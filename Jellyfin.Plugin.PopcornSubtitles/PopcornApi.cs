@@ -20,35 +20,54 @@ public sealed class PopcornApi : IDisposable
     public PopcornApi(HttpMessageHandler handler)
     {
         _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(60) };
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("Jellyfin-PopcornSubtitles/0.1.0");
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("Jellyfin-PopcornSubtitles/0.2.0");
     }
 
-    public static Uri GetBaseUri(string manifestUrl)
+    public static Uri GetBaseUri(string manifestUrl, IReadOnlyList<string>? languages = null)
     {
         if (!Uri.TryCreate(manifestUrl, UriKind.Absolute, out var uri)
             || uri.Scheme != "https" || !string.IsNullOrEmpty(uri.UserInfo)
             || !uri.AbsolutePath.EndsWith("/manifest.json", StringComparison.Ordinal)
             || !string.IsNullOrEmpty(uri.Query) || !string.IsNullOrEmpty(uri.Fragment))
             throw new ArgumentException("Enter an HTTPS URL ending in /manifest.json.");
-        return new Uri(manifestUrl[..^"manifest.json".Length]);
+        var baseUrl = manifestUrl[..^"manifest.json".Length];
+        if (languages is not null)
+        {
+            var setting = "langs=" + string.Join(',', PluginConfiguration.ParseLanguages(string.Join(',', languages)));
+            baseUrl = Regex.IsMatch(baseUrl, @"(?<=[/&])langs=[^/&]*")
+                ? Regex.Replace(baseUrl, @"(?<=[/&])langs=[^/&]*", setting)
+                : baseUrl + setting + "/";
+        }
+        return new Uri(baseUrl);
     }
 
     public static bool IsImdbId(string? id) => id is not null && Regex.IsMatch(id, @"^tt\d{5,12}$", RegexOptions.CultureInvariant);
 
     public static string CacheKey(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
-    public async Task<SubtitleTrack[]> SearchAsync(Uri baseUri, string type, string id, string filename, CancellationToken token)
+    public async Task<SubtitleTrack[]> SearchAsync(Uri baseUri, string type, string id, string filename, CancellationToken token,
+        IReadOnlyList<string>? languages = null, IReadOnlyList<string>? releaseGroups = null)
     {
         var uri = new Uri(baseUri, $"subtitles/{type}/{Uri.EscapeDataString(id)}/filename={Uri.EscapeDataString(filename)}.json");
         var bytes = await ReadAsync(uri, token);
         var result = JsonSerializer.Deserialize<SubtitleResults>(bytes, JsonOptions);
+        var preferredLanguages = (languages ?? new[] { "swe", "eng" }).ToArray();
+        var groups = releaseGroups ?? [];
         return (result?.Subtitles ?? [])
-            .Where(t => !string.IsNullOrEmpty(t.Id) && (t.Lang is "swe" or "eng") && IsTrackUri(baseUri, t.Url))
+            .Where(t => t is not null && !string.IsNullOrEmpty(t.Id) && preferredLanguages.Contains(t.Lang) && IsTrackUri(baseUri, t.Url))
             .DistinctBy(t => t.Id)
             .GroupBy(t => t.Lang)
-            .OrderBy(g => g.Key == "swe" ? 0 : 1)
-            .SelectMany(g => g.Take(4))
+            .OrderBy(g => Array.IndexOf(preferredLanguages, g.Key))
+            .SelectMany(g => g.OrderBy(t => GroupPriority(t.Label, groups)).Take(4))
             .ToArray();
+    }
+
+    private static int GroupPriority(string? label, IReadOnlyList<string> groups)
+    {
+        for (var index = 0; index < groups.Count; index++)
+            if (Regex.IsMatch(label ?? "", @"(?<![\p{L}\p{N}])" + Regex.Escape(groups[index]) + @"(?![\p{L}\p{N}])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+                return index;
+        return groups.Count;
     }
 
     public static bool IsTrackUri(Uri baseUri, string? value) =>

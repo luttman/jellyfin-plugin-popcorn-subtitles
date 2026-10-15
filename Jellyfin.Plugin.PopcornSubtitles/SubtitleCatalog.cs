@@ -35,18 +35,22 @@ public sealed class SubtitleCatalog : IDisposable
         var config = Plugin.Instance?.Configuration;
         if (config is null || !config.Enabled || !TryIdentity(item, out var type, out var id))
             return;
-        Lazy<Task<AvailableSubtitle[]>> search;
-        lock (_gate)
-        {
-            var cacheKey = (item.Id, config.ManifestUrl, item.Path);
-            if (!_searches.TryGetValue(cacheKey, out search!))
-            {
-                search = new Lazy<Task<AvailableSubtitle[]>>(() => SearchAsync(config.ManifestUrl, type, id, item.Path));
-                _searches.Set(cacheKey, search, new MemoryCacheEntryOptions { Size = 1, AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(6) });
-            }
-        }
+        (Guid, string, string, string, string) cacheKey = default;
         try
         {
+            var languages = PluginConfiguration.ParseLanguages(type == "series" ? config.SeriesLanguages : config.MovieLanguages);
+            var groups = PluginConfiguration.ParseGroups(type == "series" ? config.SeriesReleaseGroups : config.MovieReleaseGroups);
+            var baseUri = PopcornApi.GetBaseUri(config.ManifestUrl, languages);
+            cacheKey = (item.Id, baseUri.AbsoluteUri, item.Path, id, string.Join(',', groups));
+            Lazy<Task<AvailableSubtitle[]>> search;
+            lock (_gate)
+            {
+                if (!_searches.TryGetValue(cacheKey, out search!))
+                {
+                    search = new Lazy<Task<AvailableSubtitle[]>>(() => SearchAsync(baseUri, type, id, item.Path, languages, groups));
+                    _searches.Set(cacheKey, search, new MemoryCacheEntryOptions { Size = 1, AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(6) });
+                }
+            }
             var tracks = await search.Value.WaitAsync(token);
             _searches.Set(item.Id, tracks, new MemoryCacheEntryOptions { Size = 1, SlidingExpiration = TimeSpan.FromHours(12) });
             foreach (var track in tracks)
@@ -56,7 +60,8 @@ public sealed class SubtitleCatalog : IDisposable
         catch (Exception ex)
         {
             // Failed searches must be retried; the video must remain playable.
-            _searches.Remove((item.Id, config.ManifestUrl, item.Path));
+            _searches.Remove(cacheKey);
+            _searches.Remove(item.Id);
             _logger.LogWarning(ex, "Popcorn subtitle search failed for {ItemId}; continuing playback", item.Id);
         }
     }
@@ -84,10 +89,10 @@ public sealed class SubtitleCatalog : IDisposable
         return true;
     }
 
-    private async Task<AvailableSubtitle[]> SearchAsync(string manifest, string type, string id, string filename)
+    private async Task<AvailableSubtitle[]> SearchAsync(Uri baseUri, string type, string id, string filename, string[] languages, string[] groups)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var tracks = await _api.SearchAsync(PopcornApi.GetBaseUri(manifest), type, id, System.IO.Path.GetFileName(filename), timeout.Token);
+        var tracks = await _api.SearchAsync(baseUri, type, id, System.IO.Path.GetFileName(filename), timeout.Token, languages, groups);
         return tracks.Select(t =>
         {
             var hash = SHA256.HashData(Encoding.UTF8.GetBytes(t.Id));

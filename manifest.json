@@ -1,12 +1,14 @@
 [
   {
-    "overview": "Swedish and English subtitles on demand.",
-    "category": "Subtitles",
-    "owner": "luttman",
-    "name": "Popcorn Subtitles",
-    "description": "On-demand subtitles from Popcorn Notes for local movies and episodes. Experimental; requires IMDb metadata. Web and Android TV playback have not yet been verified on a running server.",
-    "guid": "a4b728c6-9e52-47ab-9184-bc34d137efb2",
     "versions": [
+      {
+        "checksum": "000d33c7e4fe5fe0ac5f322b4e8f36f5",
+        "timestamp": "2026-10-15T22:21:31.6125617Z",
+        "sourceUrl": "https://github.com/luttman/jellyfin-plugin-popcorn-subtitles/releases/download/v0.2.0.0/PopcornSubtitles_0.2.0.0.zip",
+        "changelog": "Separate language lists and release group priorities for movies and series. Swedish settings page. Settings changes bypass old search results.",
+        "targetAbi": "12.2.0.0",
+        "version": "0.2.0.0"
+      },
       {
         "changelog": "Initial test version: Swedish and English subtitle search, download on selection and server-side cache.",
         "checksum": "5a922025166121236de51bb97b400d36",
@@ -15,6 +17,12 @@
         "timestamp": "2026-10-15T22:08:40.3830667Z",
         "sourceUrl": "https://github.com/luttman/jellyfin-plugin-popcorn-subtitles/releases/download/v0.1.0.0/PopcornSubtitles_0.1.0.0.zip"
       }
-    ]
+    ],
+    "owner": "luttman",
+    "guid": "a4b728c6-9e52-47ab-9184-bc34d137efb2",
+    "category": "Subtitles",
+    "overview": "On-demand subtitles with language and release group preferences.",
+    "name": "Popcorn Subtitles",
+    "description": "On-demand subtitles from Popcorn Notes for local movies and episodes. Experimental; requires IMDb metadata. Web and Android TV playback have not yet been verified on a running server."
   }
 ]

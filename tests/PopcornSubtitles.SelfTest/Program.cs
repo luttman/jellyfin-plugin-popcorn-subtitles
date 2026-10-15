@@ -29,6 +29,13 @@ Check(!PopcornApi.IsTrackUri(baseUri, "https://example.test/private"), "Reject u
 Check(!PopcornApi.IsImdbId("../movie"), "Reject malformed IMDb IDs");
 try { PopcornApi.GetBaseUri("http://localhost/manifest.json"); throw new Exception("HTTP manifest accepted"); }
 catch (ArgumentException) { checks++; }
+Check(PluginConfiguration.ParseLanguages(" ENG, swe,eng ").SequenceEqual(new[] { "eng", "swe" }), "Normalize and deduplicate languages without changing priority");
+Check(PluginConfiguration.ParseGroups("NTb;FLUX\nntb").SequenceEqual(new[] { "NTb", "FLUX" }), "Normalize group lists and preserve priority");
+try { PluginConfiguration.ParseLanguages("sv,en"); throw new Exception("Accepted two-letter language codes"); }
+catch (ArgumentException) { checks++; }
+try { PluginConfiguration.ParseGroups(".*"); throw new Exception("Accepted wildcard group"); }
+catch (ArgumentException) { checks++; }
+Check(PopcornApi.GetBaseUri(manifest, new[] { "dan", "eng" }).AbsoluteUri.Contains("langs=dan,eng&skip=&ai=on"), "Replace remote language setting while preserving other options");
 
 var directory = Path.Combine(Path.GetTempPath(), "popcorn-selftest-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(directory);
@@ -54,7 +61,7 @@ try
         "SupportsDirectStream" => true,
         _ => null
     });
-    var handler = new FakeHandler(baseUri);
+    var handler = new FakeHandler();
     using var api = new PopcornApi(handler);
     var services = new ServiceCollection();
     services.AddLogging();
@@ -132,6 +139,38 @@ try
     Check(SubtitleCatalog.TryIdentity(episode, out var type, out var episodeId) && type == "series" && episodeId == "tt0903747:1:3", "Use series IMDb ID plus season and episode");
     episode.IndexNumber = null;
     Check(!SubtitleCatalog.TryIdentity(episode, out _, out _), "Skip episodes with incomplete numbering");
+    config.MovieLanguages = "eng,swe";
+    config.MovieReleaseGroups = "framestor,NTb";
+    var searchesBeforeSettings = handler.Searches;
+    var updated = (await manager.GetPlaybackMediaSources(movie, null!, false, false, default)).Single();
+    Check(handler.Searches == searchesBeforeSettings + 1, "Changing preferences must not reuse old search results");
+    var updatedTracks = updated.MediaStreams.Where(s => s.Index >= 1_000_000).ToArray();
+    Check(updatedTracks[0].Language == "eng", "Honor configured language order");
+    Check(updatedTracks.First(s => s.Language == "swe").Title.Contains("FraMeSToR"), "Promote preferred groups before limiting to four results");
+    var ordered = await api.SearchAsync(baseUri, "movie", "tt0133093", "movie.mkv", default, new[] { "swe" }, new[] { "NTb" });
+    Check(ordered[0].Id == "track-6", "Match a complete group token, not NTbX");
+    Check(ordered.Length == 4, "Retain fallback results alongside matching groups");
+    var fallback = await api.SearchAsync(baseUri, "movie", "tt0133093", "movie.mkv", default, new[] { "swe" }, new[] { "MissingGroup" });
+    Check(fallback[0].Id == "track-0" && fallback.Length == 4, "No group match must preserve provider order");
+    config.MovieLanguages = "eng";
+    var englishOnly = (await manager.GetPlaybackMediaSources(movie, null!, false, false, default)).Single();
+    Check(englishOnly.MediaStreams.Where(s => s.Index >= 1_000_000).All(s => s.Language == "eng"), "Exclude languages not selected for movies");
+    Check(handler.LastSearch!.AbsoluteUri.Contains("langs=eng&skip=&ai=on"), "Send the language choice to the remote provider");
+    config.SeriesLanguages = "swe";
+    config.SeriesReleaseGroups = "NTb";
+    episode.IndexNumber = 3;
+    episode.Id = Guid.NewGuid();
+    await provider.GetRequiredService<SubtitleCatalog>().EnsureAsync(episode, default);
+    var episodeTracks = provider.GetRequiredService<SubtitleCatalog>().AddStreams(episode.Id, []);
+    Check(episodeTracks.Count == 4 && episodeTracks.All(s => s.Language == "swe") && episodeTracks[0].Title.Contains("NTb"), "Series must use their own languages and release groups");
+    var danishBase = PopcornApi.GetBaseUri(manifest, new[] { "dan" });
+    var danish = await api.SearchAsync(danishBase, "movie", "tt0133093", "movie.mkv", default, new[] { "dan" });
+    Check(danish.Length == 1 && danish[0].Lang == "dan", "Allow configured languages beyond Swedish and English");
+    var xml = new System.Xml.Serialization.XmlSerializer(typeof(PluginConfiguration));
+    using var writer = new StringWriter();
+    xml.Serialize(writer, config);
+    var restored = (PluginConfiguration)xml.Deserialize(new StringReader(writer.ToString()))!;
+    Check(restored.MovieLanguages == "eng" && restored.SeriesLanguages == "swe" && restored.SeriesReleaseGroups == "NTb", "Persist separate movie and series settings");
 
     if (args.Contains("--live"))
     {
@@ -159,20 +198,24 @@ public class Stub : DispatchProxy
     }
 }
 
-sealed class FakeHandler(Uri baseUri) : HttpMessageHandler
+sealed class FakeHandler : HttpMessageHandler
 {
     public int Searches;
     public int Downloads;
     public bool FailSearch;
     public bool InvalidVtt;
+    public Uri? LastSearch;
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         if (request.RequestUri!.AbsolutePath.Contains("/subtitles/"))
         {
             Interlocked.Increment(ref Searches);
+            LastSearch = request.RequestUri;
             await Task.Delay(20, cancellationToken);
             if (FailSearch) return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
-            var tracks = Enumerable.Range(0, 12).Select(i => new SubtitleTrack($"track-{i}", i % 2 == 0 ? "swe" : "eng", $"WEB-DL #{i}", new Uri(baseUri, $"track/{i}.vtt").AbsoluteUri)).ToList();
+            var requestBase = new Uri(request.RequestUri.AbsoluteUri[..(request.RequestUri.AbsoluteUri.IndexOf("/subtitles/", StringComparison.Ordinal) + 1)]);
+            var tracks = Enumerable.Range(0, 12).Select(i => new SubtitleTrack($"track-{i}", i % 2 == 0 ? "swe" : "eng", i switch { 10 => "Blu-ray · FraMeSToR", 8 => "WEB-DL · NTbX", 6 => "WEB-DL · NTb", _ => $"WEB-DL #{i}" }, new Uri(requestBase, $"track/{i}.vtt").AbsoluteUri)).ToList();
+            tracks.Add(new("danish", "dan", "WEB-DL", new Uri(requestBase, "track/dan.vtt").AbsoluteUri));
             tracks.Add(new("evil", "swe", "Unsafe", "https://evil.test/track.vtt"));
             return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { subtitles = tracks })) };
         }

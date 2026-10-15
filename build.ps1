@@ -5,7 +5,8 @@ $projectPath = Join-Path $PSScriptRoot 'Jellyfin.Plugin.PopcornSubtitles/Jellyfi
 dotnet build $projectPath -c Release
 if ($LASTEXITCODE -ne 0) { throw 'Plugin build failed.' }
 
-$packageName = 'PopcornSubtitles_0.1.0.0'
+$version = ([xml](Get-Content -LiteralPath $projectPath -Raw)).Project.PropertyGroup.Version
+$packageName = "PopcornSubtitles_$version"
 $packageDirectory = Join-Path $PSScriptRoot "dist/$packageName"
 New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Jellyfin.Plugin.PopcornSubtitles/bin/Release/net10.0/Jellyfin.Plugin.PopcornSubtitles.dll') -Destination $packageDirectory
@@ -14,11 +15,11 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'README.md') -Destination $packa
     category = 'Subtitles'
     guid = 'a4b728c6-9e52-47ab-9184-bc34d137efb2'
     name = 'Popcorn Subtitles'
-    description = 'Swedish and English subtitles on demand from Popcorn Notes.'
+    description = 'On-demand subtitles with separate movie and series preferences.'
     overview = 'On-demand subtitle tracks for local movies and episodes.'
     owner = $Repository.Split('/')[0]
     targetAbi = '12.2.0.0'
-    version = '0.1.0.0'
+    version = $version
     timestamp = [DateTime]::UtcNow.ToString('o')
     status = 'Active'
     autoUpdate = $false
@@ -33,18 +34,23 @@ Compress-Archive -LiteralPath @(
 $package = @{
     guid = 'a4b728c6-9e52-47ab-9184-bc34d137efb2'
     name = 'Popcorn Subtitles'
-    overview = 'Swedish and English subtitles on demand.'
+    overview = 'On-demand subtitles with language and release group preferences.'
     description = 'On-demand subtitles from Popcorn Notes for local movies and episodes. Experimental; requires IMDb metadata. Web and Android TV playback have not yet been verified on a running server.'
     owner = $Repository.Split('/')[0]
     category = 'Subtitles'
     versions = @(@{
-        version = '0.1.0.0'
+        version = $version
         targetAbi = '12.2.0.0'
-        changelog = 'Initial test version: Swedish and English subtitle search, download on selection and server-side cache.'
-        sourceUrl = "https://github.com/$Repository/releases/download/v0.1.0.0/$packageName.zip"
+        changelog = 'Separate language lists and release group priorities for movies and series. Swedish settings page. Settings changes bypass old search results.'
+        sourceUrl = "https://github.com/$Repository/releases/download/v$version/$packageName.zip"
         checksum = (Get-FileHash -LiteralPath $zipPath -Algorithm MD5).Hash.ToLowerInvariant()
         timestamp = [DateTime]::UtcNow.ToString('o')
     })
+}
+$manifestPath = Join-Path $PSScriptRoot 'manifest.json'
+if (Test-Path -LiteralPath $manifestPath) {
+    $previous = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $package.versions += @($previous | Where-Object guid -EQ $package.guid | ForEach-Object { $_.versions } | Where-Object version -NE $version)
 }
 ConvertTo-Json -InputObject @($package) -Depth 8 | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'manifest.json') -Encoding utf8NoBOM
 Write-Output "Created $zipPath"
