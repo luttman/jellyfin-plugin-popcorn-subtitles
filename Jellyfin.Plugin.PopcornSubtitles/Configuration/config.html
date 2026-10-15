@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head><title>Popcorn Subtitles</title></head>
+<body>
+<div id="PopcornSubtitlesPage" data-role="page" class="page type-interior pluginConfigurationPage">
+  <div data-role="content"><div class="content-primary">
+    <form id="PopcornSubtitlesForm">
+      <h2>Popcorn Subtitles</h2>
+      <p>Search Swedish and English subtitles when playback starts. Download only the selected track. Movies and episodes need IMDb metadata.</p>
+      <div class="checkboxContainer checkboxContainer-withDescription">
+        <label><input id="PopcornEnabled" type="checkbox" is="emby-checkbox"><span>Enable subtitles during playback</span></label>
+      </div>
+      <div class="inputContainer">
+        <label class="inputLabel" for="PopcornManifest">Manifest URL</label>
+        <input id="PopcornManifest" type="url" is="emby-input" required>
+        <div class="fieldDescription">HTTPS URL ending in /manifest.json. The filename and IMDb ID are sent to this service.</div>
+      </div>
+      <p>Up to four results per language. Searches time out after five seconds; downloaded tracks remain in Jellyfin's cache for reuse.</p>
+      <button is="emby-button" type="submit" class="raised button-submit block"><span>Save</span></button>
+    </form>
+  </div></div>
+  <script type="text/javascript">
+    const popcornPluginId = 'a4b728c6-9e52-47ab-9184-bc34d137efb2';
+    document.querySelector('#PopcornSubtitlesPage').addEventListener('pageshow', async function () {
+      const config = await ApiClient.getPluginConfiguration(popcornPluginId);
+      this.querySelector('#PopcornEnabled').checked = config.Enabled;
+      this.querySelector('#PopcornManifest').value = config.ManifestUrl;
+    });
+    document.querySelector('#PopcornSubtitlesForm').addEventListener('submit', async function (event) {
+      event.preventDefault();
+      const config = await ApiClient.getPluginConfiguration(popcornPluginId);
+      config.Enabled = this.querySelector('#PopcornEnabled').checked;
+      config.ManifestUrl = this.querySelector('#PopcornManifest').value.trim();
+      try {
+        const url = new URL(config.ManifestUrl);
+        if (url.protocol !== 'https:' || !url.pathname.endsWith('/manifest.json') || url.search || url.hash || url.username || url.password) throw new Error('Invalid URL');
+      } catch (_) { Dashboard.alert('Enter an HTTPS URL ending in /manifest.json.'); return; }
+      const result = await ApiClient.updatePluginConfiguration(popcornPluginId, config);
+      Dashboard.processPluginConfigurationUpdateResult(result);
+    });
+  </script>
+</div>
+</body>
+</html>

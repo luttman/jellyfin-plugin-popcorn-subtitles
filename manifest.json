@@ -1,0 +1,20 @@
+[
+  {
+    "overview": "Swedish and English subtitles on demand.",
+    "category": "Subtitles",
+    "owner": "luttman",
+    "name": "Popcorn Subtitles",
+    "description": "On-demand subtitles from Popcorn Notes for local movies and episodes. Experimental; requires IMDb metadata. Web and Android TV playback have not yet been verified on a running server.",
+    "guid": "a4b728c6-9e52-47ab-9184-bc34d137efb2",
+    "versions": [
+      {
+        "changelog": "Initial test version: Swedish and English subtitle search, download on selection and server-side cache.",
+        "checksum": "5a922025166121236de51bb97b400d36",
+        "version": "0.1.0.0",
+        "targetAbi": "12.2.0.0",
+        "timestamp": "2026-10-15T22:08:40.3830667Z",
+        "sourceUrl": "https://github.com/luttman/jellyfin-plugin-popcorn-subtitles/releases/download/v0.1.0.0/PopcornSubtitles_0.1.0.0.zip"
+      }
+    ]
+  }
+]
