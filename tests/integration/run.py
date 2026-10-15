@@ -101,6 +101,20 @@ try:
     assert {s['Language'] for s in tracks} == {'eng', 'ger', 'fre'}, tracks
     assert len({s['Index'] for s in source['MediaStreams']}) == len(source['MediaStreams']), 'Duplicate indexes'
     assert all(1_000_000 <= s['Index'] <= 1_001_000_000 for s in tracks)
+    profile_deliveries = []
+    for name, subtitle_format in [('Web-style VTT', 'vtt'), ('Android TV-style SRT', 'srt')]:
+        response = api(f'/Items/{item}/PlaybackInfo', {
+            'UserId': user, 'IsPlayback': True, 'EnableDirectPlay': True, 'EnableDirectStream': True,
+            'DeviceProfile': {
+                'Name': name, 'MaxStreamingBitrate': 20000000,
+                'DirectPlayProfiles': [{'Container': 'mp4', 'Type': 'Video', 'VideoCodec': 'h264', 'AudioCodec': 'aac'}],
+                'SubtitleProfiles': [{'Format': subtitle_format, 'Method': 'External'}]
+            }})
+        profile_track = next(s for s in response['MediaSources'][0]['MediaStreams'] if s.get('Title', '').startswith('Popcorn') and s['Language'] == 'ger')
+        assert profile_track.get('DeliveryUrl'), profile_track
+        assert profile_track['DeliveryMethod'] == 'External', profile_track
+        assert not profile_track.get('IsExternalUrl'), 'Client should use the authenticated Jellyfin API, not the upstream service'
+        profile_deliveries.append(profile_track['DeliveryUrl'])
     assert not list((config / 'cache').rglob('*.vtt')), 'Search downloaded a subtitle eagerly'
     test_request = {'Configuration': {
         'ManifestUrl': 'https://popcorn-fixture:8443/langs=eng/manifest.json',
@@ -125,6 +139,8 @@ try:
     files = list(config.rglob('popcorn-subtitles/*.vtt'))
     assert len(files) == 1, files
     assert api(subtitle_path, raw=True) == subtitle, 'Cached delivery changed the subtitle'
+    for url in profile_deliveries:
+        assert b'CI subtitle' in api(url, raw=True), 'Device-profile subtitle delivery failed'
     # Exercise conversion, as required by clients requesting another text format.
     assert b'CI subtitle' in api(subtitle_path.replace('.vtt', '.srt'), raw=True)
     api('/Sessions/Playing/Stopped', {'ItemId': item, 'MediaSourceId': source['Id'], 'PositionTicks': 10000000})
