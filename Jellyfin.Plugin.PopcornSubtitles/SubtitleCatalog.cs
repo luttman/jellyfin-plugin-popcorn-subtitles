@@ -19,15 +19,25 @@ public sealed class SubtitleCatalog : IDisposable
     private readonly ILogger<SubtitleCatalog> _logger;
     private readonly string _directory;
     private readonly MemoryCache _searches = new(new MemoryCacheOptions { SizeLimit = 256 });
+    private readonly MemoryCache _results = new(new MemoryCacheOptions { SizeLimit = 256 });
+    private readonly MemoryCache _failures = new(new MemoryCacheOptions { SizeLimit = 256 });
     private readonly object _gate = new();
-    private readonly SemaphoreSlim[] _downloadLocks = Enumerable.Range(0, 32).Select(_ => new SemaphoreSlim(1)).ToArray();
+    private readonly Dictionary<string, DownloadLock> _downloadLocks = new(StringComparer.Ordinal);
+    private readonly object _downloadGate = new();
     private readonly MemoryCache _paths = new(new MemoryCacheOptions { SizeLimit = 2048 });
+    private long _lastCleanup;
+    private sealed class DownloadLock
+    {
+        public SemaphoreSlim Semaphore { get; } = new(1);
+        public int Users { get; set; }
+    }
 
     public SubtitleCatalog(PopcornApi api, IApplicationPaths paths, ILogger<SubtitleCatalog> logger)
     {
         _api = api;
         _logger = logger;
         _directory = System.IO.Path.Combine(paths.CachePath, "popcorn-subtitles");
+        Cleanup();
     }
 
     public async Task EnsureAsync(BaseItem item, CancellationToken token)
@@ -35,34 +45,41 @@ public sealed class SubtitleCatalog : IDisposable
         var config = Plugin.Instance?.Configuration;
         if (config is null || !config.Enabled || !TryIdentity(item, out var type, out var id))
             return;
-        (Guid, string, string, string, string) cacheKey = default;
+        (Guid, string, string, string, string, int, bool) cacheKey = default;
         try
         {
             var languages = PluginConfiguration.ParseLanguages(type == "series" ? config.SeriesLanguages : config.MovieLanguages);
             var groups = PluginConfiguration.ParseGroups(type == "series" ? config.SeriesReleaseGroups : config.MovieReleaseGroups);
-            var baseUri = PopcornApi.GetBaseUri(config.ManifestUrl, languages);
-            cacheKey = (item.Id, baseUri.AbsoluteUri, item.Path, id, string.Join(',', groups));
+            var baseUri = PopcornApi.GetBaseUri(config.ManifestUrl, languages, config.EnableAiNotes);
+            var limit = config.ResultsPerLanguage;
+            var hints = config.SearchReleaseGroups;
+            cacheKey = (item.Id, baseUri.AbsoluteUri, item.Path, id, string.Join(',', groups), limit, hints);
+            if (_failures.TryGetValue(cacheKey, out _)) return;
             Lazy<Task<AvailableSubtitle[]>> search;
             lock (_gate)
             {
                 if (!_searches.TryGetValue(cacheKey, out search!))
                 {
-                    search = new Lazy<Task<AvailableSubtitle[]>>(() => SearchAsync(baseUri, type, id, item.Path, languages, groups));
+                    search = new Lazy<Task<AvailableSubtitle[]>>(() => SearchAsync(baseUri, type, id, item.Path, languages, groups, limit, hints));
                     _searches.Set(cacheKey, search, new MemoryCacheEntryOptions { Size = 1, AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(6) });
                 }
             }
             var tracks = await search.Value.WaitAsync(token);
-            _searches.Set(item.Id, tracks, new MemoryCacheEntryOptions { Size = 1, SlidingExpiration = TimeSpan.FromHours(12) });
+            _results.Set(item.Id, tracks, new MemoryCacheEntryOptions { Size = 1, SlidingExpiration = TimeSpan.FromHours(12) });
             foreach (var track in tracks)
                 _paths.Set(track.Path, track, new MemoryCacheEntryOptions { Size = 1, SlidingExpiration = TimeSpan.FromHours(12) });
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch (Exception ex)
         {
-            // Failed searches must be retried; the video must remain playable.
-            _searches.Remove(cacheKey);
-            _searches.Remove(item.Id);
-            _logger.LogWarning(ex, "Popcorn subtitle search failed for {ItemId}; continuing playback", item.Id);
+            lock (_gate)
+            {
+                if (!_failures.TryGetValue(cacheKey, out _))
+                    _logger.LogWarning(ex, "Popcorn subtitle search failed for {ItemId}; retrying after two minutes", item.Id);
+                _failures.Set(cacheKey, true, new MemoryCacheEntryOptions { Size = 1, AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2) });
+                _searches.Remove(cacheKey);
+                _results.Remove(item.Id);
+            }
         }
     }
 
@@ -89,10 +106,10 @@ public sealed class SubtitleCatalog : IDisposable
         return true;
     }
 
-    private async Task<AvailableSubtitle[]> SearchAsync(Uri baseUri, string type, string id, string filename, string[] languages, string[] groups)
+    private async Task<AvailableSubtitle[]> SearchAsync(Uri baseUri, string type, string id, string filename, string[] languages, string[] groups, int limit, bool hints)
     {
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var tracks = await _api.SearchAsync(baseUri, type, id, System.IO.Path.GetFileName(filename), timeout.Token, languages, groups);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        var tracks = await _api.SearchAsync(baseUri, type, id, System.IO.Path.GetFileName(filename), timeout.Token, languages, groups, limit, hints);
         return tracks.Select(t =>
         {
             var hash = SHA256.HashData(Encoding.UTF8.GetBytes(t.Id));
@@ -103,7 +120,7 @@ public sealed class SubtitleCatalog : IDisposable
 
     public IReadOnlyList<MediaStream> AddStreams(Guid itemId, IReadOnlyList<MediaStream> original)
     {
-        if (Plugin.Instance?.Configuration.Enabled != true || !_searches.TryGetValue(itemId, out AvailableSubtitle[]? tracks) || tracks is null)
+        if (Plugin.Instance?.Configuration.Enabled != true || !_results.TryGetValue(itemId, out AvailableSubtitle[]? tracks) || tracks is null)
             return original;
         var streams = original.ToList();
         foreach (var track in tracks)
@@ -115,7 +132,7 @@ public sealed class SubtitleCatalog : IDisposable
                 Index = track.Index,
                 Type = MediaStreamType.Subtitle,
                 Codec = "vtt",
-                Language = track.Track.Lang,
+                Language = PopcornApi.ToBibliographic(track.Track.Lang),
                 Title = $"Popcorn · {track.Track.Label}",
                 Path = track.Path,
                 IsExternal = true,
@@ -131,10 +148,18 @@ public sealed class SubtitleCatalog : IDisposable
     {
         if (stream.Path is null || !_paths.TryGetValue(stream.Path, out AvailableSubtitle? track) || track is null)
             return;
-        var gate = _downloadLocks[(uint)track.Index % _downloadLocks.Length];
-        await gate.WaitAsync(token);
+        DownloadLock gate;
+        lock (_downloadGate)
+        {
+            if (!_downloadLocks.TryGetValue(track.Path, out gate!))
+                _downloadLocks.Add(track.Path, gate = new DownloadLock());
+            gate.Users++;
+        }
+        var entered = false;
         try
         {
+            await gate.Semaphore.WaitAsync(token);
+            entered = true;
             if (File.Exists(track.Path))
             {
                 File.SetLastWriteTimeUtc(track.Path, DateTime.UtcNow);
@@ -152,23 +177,47 @@ public sealed class SubtitleCatalog : IDisposable
             _logger.LogInformation("Downloaded Popcorn subtitle {Language}: {Label}", track.Track.Lang, track.Track.Label);
             Cleanup();
         }
-        finally { gate.Release(); }
+        finally
+        {
+            if (entered) gate.Semaphore.Release();
+            lock (_downloadGate)
+            {
+                if (--gate.Users == 0)
+                {
+                    _downloadLocks.Remove(track.Path);
+                    gate.Semaphore.Dispose();
+                }
+            }
+        }
     }
 
     private void Cleanup()
     {
-        foreach (var file in Directory.EnumerateFiles(_directory, "*.vtt"))
+        var now = DateTime.UtcNow;
+        var previous = Interlocked.Read(ref _lastCleanup);
+        if (now.Ticks - previous < TimeSpan.TicksPerHour || Interlocked.CompareExchange(ref _lastCleanup, now.Ticks, previous) != previous) return;
+        if (!Directory.Exists(_directory)) return;
+        try
         {
-            try { if (File.GetLastWriteTimeUtc(file) < DateTime.UtcNow.AddDays(-7)) File.Delete(file); }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
+            foreach (var file in Directory.EnumerateFiles(_directory))
+            {
+                var extension = System.IO.Path.GetExtension(file);
+                var retention = extension == ".vtt" ? TimeSpan.FromDays(7) : TimeSpan.FromDays(1);
+                if (extension is not (".vtt" or ".tmp")) continue;
+                try { if (File.GetLastWriteTimeUtc(file) < now - retention) File.Delete(file); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
         }
+        catch (IOException ex) { _logger.LogDebug(ex, "Could not clean the subtitle cache"); }
+        catch (UnauthorizedAccessException ex) { _logger.LogDebug(ex, "Could not clean the subtitle cache"); }
     }
 
     public void Dispose()
     {
         _searches.Dispose();
+        _results.Dispose();
+        _failures.Dispose();
         _paths.Dispose();
-        foreach (var gate in _downloadLocks) gate.Dispose();
     }
 }

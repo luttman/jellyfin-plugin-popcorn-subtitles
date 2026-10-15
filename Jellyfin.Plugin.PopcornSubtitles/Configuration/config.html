@@ -1,46 +1,76 @@
 <!DOCTYPE html>
-<html lang="sv">
+<html lang="en">
 <head><title>Popcorn Subtitles</title></head>
 <body>
 <div id="PopcornSubtitlesPage" data-role="page" class="page type-interior pluginConfigurationPage">
   <div data-role="content"><div class="content-primary">
     <form id="PopcornSubtitlesForm">
       <h2>Popcorn Subtitles</h2>
-      <p>Välj språk och prioritera releasegrupper för filmer och serier. Undertextfilen hämtas först när Jellyfin begär det valda spåret.</p>
+      <p>Choose languages and release preferences for movies and series. Subtitle files are downloaded only when Jellyfin requests the selected track.</p>
       <div class="checkboxContainer checkboxContainer-withDescription">
-        <label><input id="PopcornEnabled" type="checkbox" is="emby-checkbox"><span>Aktivera undertexter vid uppspelning</span></label>
+        <label><input id="PopcornEnabled" type="checkbox" is="emby-checkbox"><span>Enable subtitles during playback</span></label>
       </div>
-      <h3>Filmer</h3>
+      <h3>Movies</h3>
       <div class="inputContainer">
-        <label class="inputLabel" for="PopcornMovieLanguages">Språk för filmer, i prioritetsordning</label>
+        <label class="inputLabel" for="PopcornMovieLanguages">Movie languages, in priority order</label>
         <input id="PopcornMovieLanguages" type="text" is="emby-input" required placeholder="swe, eng" aria-describedby="MovieLanguagesHelp">
-        <div id="MovieLanguagesHelp" class="fieldDescription">Separera trebokstavskoder med kommatecken. Svenska: swe, engelska: eng, norska: nor, danska: dan, finska: fin. Högst 10 språk.</div>
+        <div id="MovieLanguagesHelp" class="fieldDescription">Use three-letter codes, separated by commas. Swedish: swe, English: eng, German: deu or ger, French: fra or fre. Up to 10 languages.</div>
       </div>
       <div class="inputContainer">
-        <label class="inputLabel" for="PopcornMovieGroups">Releasegrupper för filmer, i prioritetsordning</label>
+        <label class="inputLabel" for="PopcornMovieGroups">Movie release groups, in priority order</label>
         <input id="PopcornMovieGroups" type="text" is="emby-input" placeholder="FraMeSToR, FGT, RARBG" aria-describedby="MovieGroupsHelp">
-        <div id="MovieGroupsHelp" class="fieldDescription">Exempel: FraMeSToR, FGT, RARBG. Lämna tomt för tjänstens ordning.</div>
+        <div id="MovieGroupsHelp" class="fieldDescription">Leave blank to use the provider's order. Up to 30 groups.</div>
       </div>
-      <h3>Serier</h3>
+      <h3>Series</h3>
       <div class="inputContainer">
-        <label class="inputLabel" for="PopcornSeriesLanguages">Språk för serier, i prioritetsordning</label>
+        <label class="inputLabel" for="PopcornSeriesLanguages">Series languages, in priority order</label>
         <input id="PopcornSeriesLanguages" type="text" is="emby-input" required placeholder="swe, eng" aria-describedby="SeriesLanguagesHelp">
-        <div id="SeriesLanguagesHelp" class="fieldDescription">Separera trebokstavskoder med kommatecken. Första språket visas först. Högst 10 språk.</div>
+        <div id="SeriesLanguagesHelp" class="fieldDescription">The first language is shown first. Use up to 10 three-letter codes.</div>
       </div>
       <div class="inputContainer">
-        <label class="inputLabel" for="PopcornSeriesGroups">Releasegrupper för serier, i prioritetsordning</label>
+        <label class="inputLabel" for="PopcornSeriesGroups">Series release groups, in priority order</label>
         <input id="PopcornSeriesGroups" type="text" is="emby-input" placeholder="NTb, FLUX, KOGi" aria-describedby="SeriesGroupsHelp">
-        <div id="SeriesGroupsHelp" class="fieldDescription">Exempel: NTb, FLUX, KOGi. Lämna tomt för tjänstens ordning.</div>
+        <div id="SeriesGroupsHelp" class="fieldDescription">Leave blank to use the provider's order.</div>
       </div>
-      <p>Grupperna prioriteras inom varje språk, före gränsen på fyra träffar per språk. Om ingen grupp matchar visas andra träffar. Matchningen använder tjänstens beskrivning och skiljer inte på stora och små bokstäver.</p>
-      <h3>Undertextkälla</h3>
+      <h3>Search behavior</h3>
+      <div class="checkboxContainer checkboxContainer-withDescription">
+        <label><input id="PopcornSearchGroups" type="checkbox" is="emby-checkbox" aria-describedby="SearchGroupsHelp"><span>Send release-group hints to the provider</span></label>
+        <div id="SearchGroupsHelp" class="fieldDescription">Search the actual filename plus filename hints for your first three groups, in parallel. This adds up to three requests within the same three-second budget. It may improve matching; it cannot guarantee more releases. Off by default.</div>
+      </div>
       <div class="inputContainer">
-        <label class="inputLabel" for="PopcornManifest">Manifest-URL till Popcorn Notes</label>
-        <input id="PopcornManifest" type="url" is="emby-input" required aria-describedby="ManifestHelp">
-        <div id="ManifestHelp" class="fieldDescription">HTTPS-adress som slutar med /manifest.json. Språkvalen ovan ersätter länkens langs-inställning. Övriga inställningar behålls. Filnamn och IMDb-id skickas till tjänsten.</div>
+        <label class="inputLabel" for="PopcornLimit">Results per language</label>
+        <input id="PopcornLimit" type="number" min="1" max="20" step="1" required is="emby-input" aria-describedby="LimitHelp">
+        <div id="LimitHelp" class="fieldDescription">1–20 results, after group prioritization. Default: 4. Other releases remain available as fallback.</div>
       </div>
-      <p>Ändringarna används nästa gång du startar en film eller ett avsnitt. En redan pågående uppspelning kan behöva startas om.</p>
-      <button id="PopcornSave" is="emby-button" type="submit" class="raised button-submit block"><span>Spara</span></button>
+      <h3>Subtitle service</h3>
+      <div class="inputContainer">
+        <label class="inputLabel" for="PopcornManifest">Popcorn Notes manifest URL</label>
+        <input id="PopcornManifest" type="url" is="emby-input" required aria-describedby="ManifestHelp">
+        <div id="ManifestHelp" class="fieldDescription">HTTPS URL ending in /manifest.json. Language and note settings below override the URL. The third-party service receives your server IP address, IMDb ID and filename or release hints. Its logging and retention policies are not verified.</div>
+      </div>
+      <div class="checkboxContainer checkboxContainer-withDescription">
+        <label><input id="PopcornAiNotes" type="checkbox" is="emby-checkbox" aria-describedby="AiHelp"><span>Allow AI and added informational notes</span></label>
+        <div id="AiHelp" class="fieldDescription">Opt in to AI trivia and other added note categories. Off by default, including after upgrading from older versions. This is not an AI-translation setting. The provider may still include its own messages.</div>
+      </div>
+      <p>Changes apply to the next playback. Restart an existing playback to refresh its track list.</p>
+      <button id="PopcornSave" is="emby-button" type="submit" class="raised button-submit block"><span>Save</span></button>
+      <h3>Test search</h3>
+      <p>Use the values currently entered above without saving them. This searches metadata only and does not download subtitles.</p>
+      <div class="selectContainer">
+        <label class="selectLabel" for="PopcornTestType">Media type</label>
+        <select id="PopcornTestType" is="emby-select"><option value="movie">Movie</option><option value="series">Series</option></select>
+      </div>
+      <div class="inputContainer">
+        <label class="inputLabel" for="PopcornTestId">IMDb ID</label>
+        <input id="PopcornTestId" is="emby-input" type="text" value="tt0133093" aria-describedby="TestIdHelp">
+        <div id="TestIdHelp" class="fieldDescription">Movie: tt0133093. Series: series IMDb ID followed by season and episode, for example tt0903747:1:3.</div>
+      </div>
+      <div class="inputContainer">
+        <label class="inputLabel" for="PopcornTestFilename">Release filename</label>
+        <input id="PopcornTestFilename" is="emby-input" type="text" value="The.Matrix.1999.1080p.BluRay.mkv">
+      </div>
+      <button id="PopcornTest" is="emby-button" type="button" class="raised block"><span>Test search</span></button>
+      <pre id="PopcornTestResult" role="status" aria-live="polite" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
     </form>
   </div></div>
   <script type="text/javascript">
@@ -49,43 +79,68 @@
     const page = document.querySelector('#PopcornSubtitlesPage');
     const fields = { MovieLanguages: '#PopcornMovieLanguages', SeriesLanguages: '#PopcornSeriesLanguages', MovieReleaseGroups: '#PopcornMovieGroups', SeriesReleaseGroups: '#PopcornSeriesGroups' };
     const split = value => value.split(/[,;\r\n]+/).map(s => s.trim()).filter(Boolean);
+    const get = selector => page.querySelector(selector);
     page.addEventListener('pageshow', async function () {
+      get('#PopcornSave').disabled = true;
       try {
         const config = await ApiClient.getPluginConfiguration(pluginId);
-        page.querySelector('#PopcornEnabled').checked = config.Enabled;
-        page.querySelector('#PopcornManifest').value = config.ManifestUrl;
+        get('#PopcornEnabled').checked = config.Enabled;
+        get('#PopcornManifest').value = config.ManifestUrl;
+        get('#PopcornAiNotes').checked = config.EnableAiNotes ?? false;
+        get('#PopcornSearchGroups').checked = config.SearchReleaseGroups ?? false;
+        get('#PopcornLimit').value = config.ResultsPerLanguage ?? 4;
         for (const [key, selector] of Object.entries(fields))
-          page.querySelector(selector).value = config[key] ?? (key.endsWith('Languages') ? 'swe,eng' : '');
-      } catch (_) { Dashboard.alert('Kunde inte läsa inställningarna. Öppna sidan igen.'); }
+          get(selector).value = config[key] ?? (key.endsWith('Languages') ? 'swe,eng' : '');
+        get('#PopcornSave').disabled = false;
+      } catch (_) { Dashboard.alert('Could not load settings. Open this page again.'); }
     });
-    page.querySelector('#PopcornSubtitlesForm').addEventListener('submit', async function (event) {
+    async function collect() {
+      const manifest = get('#PopcornManifest').value.trim();
+      let url;
+      try { url = new URL(manifest); } catch (_) { throw new Error('Enter a valid HTTPS manifest URL.'); }
+      if (url.protocol !== 'https:' || !url.pathname.endsWith('/manifest.json') || url.search || url.hash || url.username || url.password)
+        throw new Error('Enter an HTTPS URL ending in /manifest.json.');
+      const values = {};
+      for (const [key, selector] of Object.entries(fields)) {
+        const list = split(get(selector).value);
+        if (key.endsWith('Languages')) {
+          if (!list.length || list.length > 10 || list.some(s => !/^[a-z]{3}$/i.test(s)))
+            throw new Error('Enter 1–10 languages using three-letter codes, for example swe,eng.');
+          values[key] = [...new Set(list.map(s => s.toLowerCase()))].join(',');
+        } else {
+          if (list.length > 30 || list.some(s => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(s)))
+            throw new Error('Enter up to 30 groups using letters, numbers, dots, hyphens or underscores.');
+          values[key] = list.join(',');
+        }
+      }
+      const limit = Number(get('#PopcornLimit').value);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 20) throw new Error('Results per language must be between 1 and 20.');
+      const config = await ApiClient.getPluginConfiguration(pluginId);
+      return Object.assign(config, values, { Enabled: get('#PopcornEnabled').checked, ManifestUrl: manifest,
+        EnableAiNotes: get('#PopcornAiNotes').checked, SearchReleaseGroups: get('#PopcornSearchGroups').checked, ResultsPerLanguage: limit });
+    }
+    get('#PopcornSubtitlesForm').addEventListener('submit', async function (event) {
       event.preventDefault();
-      const save = page.querySelector('#PopcornSave');
+      const save = get('#PopcornSave');
       save.disabled = true;
       try {
-        const manifest = page.querySelector('#PopcornManifest').value.trim();
-        const url = new URL(manifest);
-        if (url.protocol !== 'https:' || !url.pathname.endsWith('/manifest.json') || url.search || url.hash || url.username || url.password)
-          throw new Error('Ange en HTTPS-adress som slutar med /manifest.json.');
-        const values = {};
-        for (const [key, selector] of Object.entries(fields)) {
-          const list = split(page.querySelector(selector).value);
-          if (key.endsWith('Languages')) {
-            if (!list.length || list.length > 10 || list.some(s => !/^[a-z]{3}$/i.test(s)))
-              throw new Error('Ange 1–10 språk med trebokstavskoder, till exempel swe,eng.');
-            values[key] = [...new Set(list.map(s => s.toLowerCase()))].join(',');
-          } else {
-            if (list.length > 30 || list.some(s => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(s)))
-              throw new Error('Ange högst 30 releasegrupper med bokstäver, siffror, punkt, bindestreck eller understreck.');
-            values[key] = list.join(',');
-          }
-        }
-        const config = await ApiClient.getPluginConfiguration(pluginId);
-        Object.assign(config, values, { Enabled: page.querySelector('#PopcornEnabled').checked, ManifestUrl: manifest });
-        const result = await ApiClient.updatePluginConfiguration(pluginId, config);
+        const result = await ApiClient.updatePluginConfiguration(pluginId, await collect());
         Dashboard.processPluginConfigurationUpdateResult(result);
-      } catch (error) { Dashboard.alert(error.message || 'Kunde inte spara inställningarna. Försök igen.'); }
+      } catch (error) { Dashboard.alert(error.message || 'Could not save settings. Try again.'); }
       finally { save.disabled = false; }
+    });
+    get('#PopcornTest').addEventListener('click', async function () {
+      this.disabled = true;
+      const output = get('#PopcornTestResult');
+      output.textContent = 'Searching…';
+      try {
+        const request = { Configuration: await collect(), Type: get('#PopcornTestType').value,
+          Id: get('#PopcornTestId').value.trim(), Filename: get('#PopcornTestFilename').value.trim() };
+        const result = await ApiClient.ajax({ type: 'POST', url: ApiClient.getUrl('PopcornSubtitles/TestSearch'),
+          contentType: 'application/json', dataType: 'json', data: JSON.stringify(request) });
+        output.textContent = result.count + ' results\n' + result.tracks.map(t => t.language + ' · ' + t.label).join('\n');
+      } catch (error) { output.textContent = error.responseText || error.message || 'Search failed. Check the manifest URL and try again.'; }
+      finally { this.disabled = false; }
     });
   })();
   </script>

@@ -22,12 +22,13 @@ public sealed class PopcornMediaSourceManager(IMediaSourceManager inner, Subtitl
     public async Task<IReadOnlyList<MediaSourceInfo>> GetPlaybackMediaSources(BaseItem item, User user, bool allowMediaProbe, bool enablePathSubstitution, CancellationToken cancellationToken)
     {
         var sources = await inner.GetPlaybackMediaSources(item, user, allowMediaProbe, enablePathSubstitution, cancellationToken);
-        await catalog.EnsureAsync(item, cancellationToken);
+        var items = new List<BaseItem> { item };
         foreach (var source in sources)
         {
             if (Guid.TryParse(source.Id, out var id) && id != item.Id && library.GetItemById(id) is { } alternate)
-                await catalog.EnsureAsync(alternate, cancellationToken);
+                items.Add(alternate);
         }
+        await Task.WhenAll(items.DistinctBy(i => i.Id).Select(i => catalog.EnsureAsync(i, cancellationToken)));
         return sources.Select(s => Augment(s, item)).ToArray();
     }
 
@@ -38,7 +39,9 @@ public sealed class PopcornMediaSourceManager(IMediaSourceManager inner, Subtitl
     {
         var source = await inner.GetMediaSource(item, mediaSourceId, liveStreamId, enablePathSubstitution, cancellationToken);
         if (source is null || !string.IsNullOrEmpty(liveStreamId)) return source!;
-        await catalog.EnsureAsync(item, cancellationToken);
+        var sourceItem = Guid.TryParse(source.Id, out var sourceId) && sourceId != item.Id
+            ? library.GetItemById(sourceId) ?? item : item;
+        await catalog.EnsureAsync(sourceItem, cancellationToken);
         return Augment(source, item);
     }
 

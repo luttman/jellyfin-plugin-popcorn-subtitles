@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace Jellyfin.Plugin.PopcornSubtitles;
 
@@ -15,15 +16,21 @@ public sealed class PopcornApi : IDisposable
     private readonly HttpClient _http;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
-    public PopcornApi() : this(new HttpClientHandler { AllowAutoRedirect = false }) { }
+    [ActivatorUtilitiesConstructor]
+    public PopcornApi() : this(new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(5),
+        ConnectTimeout = TimeSpan.FromSeconds(3)
+    }) { }
 
     public PopcornApi(HttpMessageHandler handler)
     {
         _http = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(60) };
-        _http.DefaultRequestHeaders.UserAgent.ParseAdd("Jellyfin-PopcornSubtitles/0.2.0");
+        _http.DefaultRequestHeaders.UserAgent.ParseAdd("Jellyfin-PopcornSubtitles/" + typeof(Plugin).Assembly.GetName().Version);
     }
 
-    public static Uri GetBaseUri(string manifestUrl, IReadOnlyList<string>? languages = null)
+    public static Uri GetBaseUri(string manifestUrl, IReadOnlyList<string>? languages = null, bool? enableAiNotes = null)
     {
         if (!Uri.TryCreate(manifestUrl, UriKind.Absolute, out var uri)
             || uri.Scheme != "https" || !string.IsNullOrEmpty(uri.UserInfo)
@@ -34,11 +41,28 @@ public sealed class PopcornApi : IDisposable
         if (languages is not null)
         {
             var setting = "langs=" + string.Join(',', PluginConfiguration.ParseLanguages(string.Join(',', languages)));
-            baseUrl = Regex.IsMatch(baseUrl, @"(?<=[/&])langs=[^/&]*")
-                ? Regex.Replace(baseUrl, @"(?<=[/&])langs=[^/&]*", setting)
-                : baseUrl + setting + "/";
+            baseUrl = SetOption(baseUrl, "langs", setting[6..]);
+        }
+        if (enableAiNotes is not null)
+        {
+            baseUrl = SetOption(baseUrl, "ai", enableAiNotes.Value ? "on" : "off");
+            // ai=off alone still allows non-AI trivia; the explicit checkbox controls both.
+            var match = Regex.Match(baseUrl, @"(?<=[/&])skip=([^/&]*)");
+            var existing = Uri.UnescapeDataString(match.Groups[1].Value).Split(',', StringSplitOptions.RemoveEmptyEntries);
+            var categories = new[] { "recap", "trivia", "goofs", "characters", "ratings" };
+            var skip = enableAiNotes.Value ? existing.Except(categories) : existing.Concat(categories).Distinct();
+            baseUrl = SetOption(baseUrl, "skip", string.Join(',', skip.Select(Uri.EscapeDataString)));
         }
         return new Uri(baseUrl);
+    }
+
+    private static string SetOption(string baseUrl, string key, string value)
+    {
+        var pattern = @"(?<=[/&])" + key + "=[^/&]*";
+        if (Regex.IsMatch(baseUrl, pattern)) return Regex.Replace(baseUrl, pattern, _ => key + "=" + value);
+        var trimmed = baseUrl.TrimEnd('/');
+        var lastSegment = new Uri(baseUrl).AbsolutePath.TrimEnd('/').Split('/').Last();
+        return trimmed + (lastSegment.Contains('=') ? "&" : "/") + key + "=" + value + "/";
     }
 
     public static bool IsImdbId(string? id) => id is not null && Regex.IsMatch(id, @"^tt\d{5,12}$", RegexOptions.CultureInvariant);
@@ -46,28 +70,67 @@ public sealed class PopcornApi : IDisposable
     public static string CacheKey(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
     public async Task<SubtitleTrack[]> SearchAsync(Uri baseUri, string type, string id, string filename, CancellationToken token,
-        IReadOnlyList<string>? languages = null, IReadOnlyList<string>? releaseGroups = null)
+        IReadOnlyList<string>? languages = null, IReadOnlyList<string>? releaseGroups = null, int limit = 4, bool searchReleaseGroups = false)
     {
-        var uri = new Uri(baseUri, $"subtitles/{type}/{Uri.EscapeDataString(id)}/filename={Uri.EscapeDataString(filename)}.json");
-        var bytes = await ReadAsync(uri, token);
-        var result = JsonSerializer.Deserialize<SubtitleResults>(bytes, JsonOptions);
+        if (limit is < 1 or > 20) throw new ArgumentOutOfRangeException(nameof(limit));
         var preferredLanguages = (languages ?? new[] { "swe", "eng" }).ToArray();
         var groups = releaseGroups ?? [];
-        return (result?.Subtitles ?? [])
-            .Where(t => t is not null && !string.IsNullOrEmpty(t.Id) && preferredLanguages.Contains(t.Lang) && IsTrackUri(baseUri, t.Url))
+        var patterns = groups.Select(group => new Regex(@"(?<![\p{L}\p{N}])" + Regex.Escape(group) + @"(?![\p{L}\p{N}])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100))).ToArray();
+        var filenames = new[] { filename }.Concat(searchReleaseGroups ? groups.Take(3).Select(group => ReleaseHint(filename, group)) : []).Distinct();
+        // All requests share the caller's budget; a failed hint must not discard a successful normal search.
+        var batches = await Task.WhenAll(filenames.Select(async name =>
+        {
+            try
+            {
+                var uri = new Uri(baseUri, $"subtitles/{type}/{Uri.EscapeDataString(id)}/filename={Uri.EscapeDataString(name)}.json");
+                var bytes = await ReadAsync(uri, token);
+                return (Tracks: JsonSerializer.Deserialize<SubtitleResults>(bytes, JsonOptions)?.Subtitles ?? [], Error: (Exception?)null);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or InvalidDataException or JsonException)
+            {
+                return (Tracks: Array.Empty<SubtitleTrack>(), Error: ex);
+            }
+        }));
+        if (batches.All(b => b.Error is not null)) throw batches[0].Error!;
+        return batches.SelectMany(b => b.Tracks)
+            .Where(t => t is not null && !string.IsNullOrEmpty(t.Id) && preferredLanguages.Contains(ToTerminologic(t.Lang)) && IsTrackUri(baseUri, t.Url))
+            .Select(t => t with { Lang = ToTerminologic(t.Lang) })
             .DistinctBy(t => t.Id)
             .GroupBy(t => t.Lang)
             .OrderBy(g => Array.IndexOf(preferredLanguages, g.Key))
-            .SelectMany(g => g.OrderBy(t => GroupPriority(t.Label, groups)).Take(4))
+            .SelectMany(g => g.OrderBy(t => GroupPriority(t.Label, patterns)).Take(limit))
             .ToArray();
     }
 
-    private static int GroupPriority(string? label, IReadOnlyList<string> groups)
+    public static string ReleaseHint(string filename, string group)
     {
-        for (var index = 0; index < groups.Count; index++)
-            if (Regex.IsMatch(label ?? "", @"(?<![\p{L}\p{N}])" + Regex.Escape(groups[index]) + @"(?![\p{L}\p{N}])", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        var stem = Path.GetFileNameWithoutExtension(filename);
+        stem = Regex.Replace(stem, @"-[A-Za-z0-9]+$", "");
+        return stem + "-" + group + Path.GetExtension(filename);
+    }
+
+    public static string ToBibliographic(string language) => language switch
+    {
+        "deu" => "ger", "fra" => "fre", "zho" => "chi", "ces" => "cze", "nld" => "dut", "ell" => "gre",
+        "ron" => "rum", "slk" => "slo", "fas" => "per", "isl" => "ice", "msa" => "may", "mya" => "bur",
+        "hye" => "arm", "eus" => "baq", "kat" => "geo", "mkd" => "mac", "mri" => "mao", "sqi" => "alb",
+        "bod" => "tib", "cym" => "wel", _ => language
+    };
+
+    public static string ToTerminologic(string language) => language switch
+    {
+        "ger" => "deu", "fre" => "fra", "chi" => "zho", "cze" => "ces", "dut" => "nld", "gre" => "ell",
+        "rum" => "ron", "slo" => "slk", "per" => "fas", "ice" => "isl", "may" => "msa", "bur" => "mya",
+        "arm" => "hye", "baq" => "eus", "geo" => "kat", "mac" => "mkd", "mao" => "mri", "alb" => "sqi",
+        "tib" => "bod", "wel" => "cym", _ => language
+    };
+
+    private static int GroupPriority(string? label, IReadOnlyList<Regex> patterns)
+    {
+        for (var index = 0; index < patterns.Count; index++)
+            if (patterns[index].IsMatch(label ?? ""))
                 return index;
-        return groups.Count;
+        return patterns.Count;
     }
 
     public static bool IsTrackUri(Uri baseUri, string? value) =>

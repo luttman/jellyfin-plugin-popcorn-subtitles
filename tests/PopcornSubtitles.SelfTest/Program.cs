@@ -36,6 +36,11 @@ catch (ArgumentException) { checks++; }
 try { PluginConfiguration.ParseGroups(".*"); throw new Exception("Accepted wildcard group"); }
 catch (ArgumentException) { checks++; }
 Check(PopcornApi.GetBaseUri(manifest, new[] { "dan", "eng" }).AbsoluteUri.Contains("langs=dan,eng&skip=&ai=on"), "Replace remote language setting while preserving other options");
+Check(PopcornApi.GetBaseUri(manifest, new[] { "eng" }, false).AbsoluteUri.Contains("ai=off"), "AI notes must override old URLs to off");
+Check(PluginConfiguration.ParseLanguages("ger,fre,deu").SequenceEqual(new[] { "deu", "fra" }), "Normalize ISO 639-2/B aliases for the provider");
+Check(PopcornApi.ToBibliographic("deu") == "ger" && PopcornApi.ToBibliographic("fra") == "fre", "Use ISO 639-2/B codes for Jellyfin tracks");
+Check(PopcornApi.ReleaseHint("Movie.1080p-ETHEL.mkv", "NTb") == "Movie.1080p-NTb.mkv", "Replace the group suffix when creating a search hint");
+Check(PopcornApi.GetBaseUri(new PluginConfiguration().ManifestUrl, new[] { "eng" }, true).AbsoluteUri.Contains("skip=&ai=on"), "Explicit note opt-in must enable categories even on the default opt-out URL");
 
 var directory = Path.Combine(Path.GetTempPath(), "popcorn-selftest-" + Guid.NewGuid().ToString("N"));
 Directory.CreateDirectory(directory);
@@ -88,7 +93,16 @@ try
     new ServiceRegistrator().RegisterServices(services, null!);
     services.AddSingleton(api);
     using var provider = services.BuildServiceProvider();
+    var cacheDirectory = Path.Combine(directory, "popcorn-subtitles");
+    Directory.CreateDirectory(cacheDirectory);
+    var oldTemp = Path.Combine(cacheDirectory, "crashed.tmp");
+    File.WriteAllText(oldTemp, "incomplete");
+    File.SetLastWriteTimeUtc(oldTemp, DateTime.UtcNow.AddDays(-2));
+    var recentTemp = Path.Combine(cacheDirectory, "active.tmp");
+    File.WriteAllText(recentTemp, "in progress");
     var manager = provider.GetRequiredService<IMediaSourceManager>();
+    Check(!File.Exists(oldTemp) && File.Exists(recentTemp), "Clean crashed temporary files without deleting active downloads");
+    File.Delete(recentTemp);
     var encoder = provider.GetRequiredService<ISubtitleEncoder>();
     Check(manager.SupportsDirectStream("movie.mkv", MediaBrowser.Model.MediaInfo.MediaProtocol.File), "Forward existing media behavior");
     var responses = await Task.WhenAll(Enumerable.Range(0, 4).Select(_ => manager.GetPlaybackMediaSources(movie, null!, false, false, default)));
@@ -118,8 +132,13 @@ try
     await provider.GetRequiredService<SubtitleCatalog>().EnsureAsync(secondMovie, default);
     Check(provider.GetRequiredService<SubtitleCatalog>().AddStreams(secondMovie.Id, []).Count == 0, "Service failure must leave playback untouched");
     handler.FailSearch = false;
+    var failedSearches = handler.Searches;
     await provider.GetRequiredService<SubtitleCatalog>().EnsureAsync(secondMovie, default);
-    Check(provider.GetRequiredService<SubtitleCatalog>().AddStreams(secondMovie.Id, []).Count == 8, "Retry a failed search");
+    Check(handler.Searches == failedSearches, "Cache failures instead of retrying every playback-info request");
+    config.ResultsPerLanguage = 3;
+    await provider.GetRequiredService<SubtitleCatalog>().EnsureAsync(secondMovie, default);
+    Check(provider.GetRequiredService<SubtitleCatalog>().AddStreams(secondMovie.Id, []).Count == 6, "Changed settings bypass the cached failure");
+    config.ResultsPerLanguage = 4;
     var third = source.MediaStreams.Skip(3).First();
     handler.InvalidVtt = true;
     try
@@ -155,7 +174,7 @@ try
     config.MovieLanguages = "eng";
     var englishOnly = (await manager.GetPlaybackMediaSources(movie, null!, false, false, default)).Single();
     Check(englishOnly.MediaStreams.Where(s => s.Index >= 1_000_000).All(s => s.Language == "eng"), "Exclude languages not selected for movies");
-    Check(handler.LastSearch!.AbsoluteUri.Contains("langs=eng&skip=&ai=on"), "Send the language choice to the remote provider");
+    Check(handler.LastSearch!.AbsoluteUri.Contains("langs=eng&") && handler.LastSearch.AbsoluteUri.Contains("ai=off"), "Send languages and explicit note opt-out to the provider");
     config.SeriesLanguages = "swe";
     config.SeriesReleaseGroups = "NTb";
     episode.IndexNumber = 3;
@@ -171,6 +190,22 @@ try
     xml.Serialize(writer, config);
     var restored = (PluginConfiguration)xml.Deserialize(new StringReader(writer.ToString()))!;
     Check(restored.MovieLanguages == "eng" && restored.SeriesLanguages == "swe" && restored.SeriesReleaseGroups == "NTb", "Persist separate movie and series settings");
+    handler.InvalidVtt = false;
+    var beforeHints = handler.Searches;
+    await api.SearchAsync(baseUri, "movie", "tt0133093", "Movie-ETHEL.mkv", default, new[] { "eng" }, new[] { "NTb", "FLUX", "FGT", "RARBG" }, 2, true);
+    Check(handler.Searches == beforeHints + 4, "Limit release-hint expansion to three parallel requests plus the original filename");
+    Check(handler.Filenames.Contains("Movie-NTb.mkv") && handler.Filenames.Contains("Movie-ETHEL.mkv"), "Send release hints upstream, not just local sort rules");
+    var limited = await api.SearchAsync(baseUri, "movie", "tt0133093", "movie.mkv", default, new[] { "swe" }, null, 2);
+    Check(limited.Length == 2, "Honor the configured hit limit");
+    var beforeConcurrent = handler.Downloads;
+    await Task.WhenAll(Enumerable.Range(0, 5).Select(_ => provider.GetRequiredService<SubtitleCatalog>().MaterializeAsync(third, default)));
+    Check(handler.Downloads == beforeConcurrent + 1, "Coalesce concurrent downloads of the same path");
+    var missingServices = new ServiceCollection();
+    missingServices.AddLogging();
+    new ServiceRegistrator().RegisterServices(missingServices, null!);
+    using var missingProvider = missingServices.BuildServiceProvider();
+    foreach (var warning in missingProvider.GetServices<Microsoft.Extensions.Hosting.IHostedService>()) await warning.StartAsync(default);
+    Check(missingProvider.GetService<IMediaSourceManager>() is null, "Missing host services must disable integration without crashing registration");
 
     if (args.Contains("--live"))
     {
@@ -205,12 +240,15 @@ sealed class FakeHandler : HttpMessageHandler
     public bool FailSearch;
     public bool InvalidVtt;
     public Uri? LastSearch;
+    public System.Collections.Concurrent.ConcurrentBag<string> Filenames = new();
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         if (request.RequestUri!.AbsolutePath.Contains("/subtitles/"))
         {
             Interlocked.Increment(ref Searches);
             LastSearch = request.RequestUri;
+            var encodedFilename = request.RequestUri.AbsoluteUri.Split("/filename=")[1];
+            Filenames.Add(Uri.UnescapeDataString(encodedFilename[..^5]));
             await Task.Delay(20, cancellationToken);
             if (FailSearch) return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
             var requestBase = new Uri(request.RequestUri.AbsoluteUri[..(request.RequestUri.AbsoluteUri.IndexOf("/subtitles/", StringComparison.Ordinal) + 1)]);
@@ -220,6 +258,7 @@ sealed class FakeHandler : HttpMessageHandler
             return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { subtitles = tracks })) };
         }
         Interlocked.Increment(ref Downloads);
+        await Task.Delay(20, cancellationToken);
         return new(HttpStatusCode.OK) { Content = new StringContent(InvalidVtt ? "<html>Error</html>" : "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHej!\n", Encoding.UTF8, "text/vtt") };
     }
 }

@@ -1,0 +1,36 @@
+name: Verify plugin and Jellyfin playback
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        jellyfin: ['12.2']
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build and run isolated tests
+        run: |
+          dotnet build Jellyfin.Plugin.PopcornSubtitles -c Release
+          dotnet run --project tests/PopcornSubtitles.SelfTest -c Release
+          node tests/settings-page.test.cjs
+      - name: Run real Jellyfin server integration
+        env:
+          JELLYFIN_IMAGE: jellyfin/jellyfin:${{ matrix.jellyfin }}
+        run: python3 tests/integration/run.py
+      - name: Save server logs and playback evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: jellyfin-${{ matrix.jellyfin }}-evidence
+          path: tests/integration/output/

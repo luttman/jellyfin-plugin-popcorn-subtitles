@@ -3,7 +3,9 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <Version>0.2.0.0</Version>
+    <Version>0.3.0.0</Version>
+    <Description>On-demand subtitles with separate language and release preferences for movies and series.</Description>
+    <PackageLicenseExpression>GPL-3.0-only</PackageLicenseExpression>
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
   </PropertyGroup>
   <ItemGroup>
