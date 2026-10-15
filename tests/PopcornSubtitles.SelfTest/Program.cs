@@ -224,6 +224,20 @@ try
     }
     finally { handler.ReleaseSlow.TrySetResult(); }
     await slow;
+    handler.SearchDelay = 100;
+    handler.PeakSearches = 0;
+    var versions = Enumerable.Range(0, 3).Select(i =>
+    {
+        var version = new Movie { Id = Guid.NewGuid(), Path = Path.Combine(directory, $"Alternate-{i}.mkv") };
+        version.ProviderIds["Imdb"] = "tt0133093";
+        return version;
+    }).ToArray();
+    var variantInner = Stub.For<IMediaSourceManager>((method, _) => method.Name == "GetPlaybackMediaSources"
+        ? Task.FromResult<IReadOnlyList<MediaSourceInfo>>(versions.Select(v => new MediaSourceInfo { Id = v.Id.ToString("N"), Path = v.Path, MediaStreams = [] }).ToArray()) : null);
+    var variantLibrary = Stub.For<ILibraryManager>((method, arguments) => method.Name == "GetItemById" ? versions.FirstOrDefault(v => v.Id == (Guid)arguments![0]!) : null);
+    var variantManager = new PopcornMediaSourceManager(variantInner, provider.GetRequiredService<SubtitleCatalog>(), variantLibrary);
+    await variantManager.GetPlaybackMediaSources(versions[0], null!, false, false, default);
+    Check(handler.PeakSearches >= 3, "Search alternate versions concurrently rather than accumulating timeouts");
 
     if (args.Contains("--live"))
     {
@@ -260,6 +274,9 @@ sealed class FakeHandler : HttpMessageHandler
     public Uri? LastSearch;
     public System.Collections.Concurrent.ConcurrentBag<string> Filenames = new();
     public int CandidateCount = 12;
+    public int SearchDelay = 20;
+    public int ActiveSearches;
+    public int PeakSearches;
     public string? SlowUrl;
     public TaskCompletionSource SlowStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource ReleaseSlow = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -271,7 +288,11 @@ sealed class FakeHandler : HttpMessageHandler
             LastSearch = request.RequestUri;
             var encodedFilename = request.RequestUri.AbsoluteUri.Split("/filename=")[1];
             Filenames.Add(Uri.UnescapeDataString(encodedFilename[..^5]));
-            await Task.Delay(20, cancellationToken);
+            var active = Interlocked.Increment(ref ActiveSearches);
+            int previous;
+            do { previous = PeakSearches; } while (active > previous && Interlocked.CompareExchange(ref PeakSearches, active, previous) != previous);
+            try { await Task.Delay(SearchDelay, cancellationToken); }
+            finally { Interlocked.Decrement(ref ActiveSearches); }
             if (FailSearch) return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
             var requestBase = new Uri(request.RequestUri.AbsoluteUri[..(request.RequestUri.AbsoluteUri.IndexOf("/subtitles/", StringComparison.Ordinal) + 1)]);
             var tracks = Enumerable.Range(0, CandidateCount).Select(i => new SubtitleTrack($"track-{i}", i % 2 == 0 ? "swe" : "eng", i switch { 10 => "Blu-ray · FraMeSToR", 8 => "WEB-DL · NTbX", 6 => "WEB-DL · NTb", _ => $"WEB-DL #{i}" }, new Uri(requestBase, $"track/{i}.vtt").AbsoluteUri)).ToList();

@@ -102,6 +102,19 @@ try:
     assert len({s['Index'] for s in source['MediaStreams']}) == len(source['MediaStreams']), 'Duplicate indexes'
     assert all(1_000_000 <= s['Index'] <= 1_001_000_000 for s in tracks)
     assert not list((config / 'cache').rglob('*.vtt')), 'Search downloaded a subtitle eagerly'
+    test_request = {'Configuration': {
+        'ManifestUrl': 'https://popcorn-fixture:8443/langs=eng/manifest.json',
+        'MovieLanguages': 'eng,deu,fra', 'SeriesLanguages': 'eng', 'ResultsPerLanguage': 1,
+        'EnableAiNotes': False, 'SearchReleaseGroups': True, 'MovieReleaseGroups': 'TEST'},
+        'Type': 'movie', 'Id': 'tt0133093', 'Filename': 'Fixture.2026-TEST.mp4'}
+    tested = api('/PopcornSubtitles/TestSearch', test_request)
+    assert tested['count'] == 3, tested
+    try:
+        api('/PopcornSubtitles/TestSearch', test_request, headers={'Authorization': ''})
+        raise AssertionError('Anonymous test search was allowed')
+    except RuntimeError as error:
+        assert 'HTTP 401' in str(error) or 'HTTP 403' in str(error), error
+    assert not list((config / 'cache').rglob('*.vtt')), 'Test search downloaded subtitles'
     result = api(f'/Videos/{item}/stream?Static=true&MediaSourceId={source["Id"]}', raw=True, headers={'Range': 'bytes=0-4095'})
     assert len(result) > 0, 'Video playback returned no bytes'
     api('/Sessions/Playing', {'ItemId': item, 'MediaSourceId': source['Id'], 'PlaySessionId': playback.get('PlaySessionId'), 'PositionTicks': 0, 'CanSeek': True, 'PlayMethod': 'DirectPlay'})
