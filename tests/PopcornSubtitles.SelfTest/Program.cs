@@ -206,6 +206,24 @@ try
     using var missingProvider = missingServices.BuildServiceProvider();
     foreach (var warning in missingProvider.GetServices<Microsoft.Extensions.Hosting.IHostedService>()) await warning.StartAsync(default);
     Check(missingProvider.GetService<IMediaSourceManager>() is null, "Missing host services must disable integration without crashing registration");
+    config.MovieLanguages = "swe,eng";
+    config.MovieReleaseGroups = "";
+    config.ResultsPerLanguage = 20;
+    handler.CandidateCount = 80;
+    var many = (await manager.GetPlaybackMediaSources(movie, null!, false, false, default)).Single();
+    var collisions = many.MediaStreams.Where(s => s.Index >= 1_000_000 && !File.Exists(s.Path)).GroupBy(s => s.Index % 32).First(g => g.Count() > 1).Take(2).ToArray();
+    var prefix = handler.LastSearch!.AbsoluteUri[..(handler.LastSearch.AbsoluteUri.IndexOf("/subtitles/", StringComparison.Ordinal) + 1)];
+    handler.SlowUrl = Enumerable.Range(0, 80).Select(i => prefix + $"track/{i}.vtt").First(url => Path.GetFileName(collisions[0].Path) == PopcornApi.CacheKey(url) + ".vtt");
+    var slow = provider.GetRequiredService<SubtitleCatalog>().MaterializeAsync(collisions[0], default);
+    await handler.SlowStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
+    try
+    {
+        var unrelated = provider.GetRequiredService<SubtitleCatalog>().MaterializeAsync(collisions[1], default);
+        Check(await Task.WhenAny(unrelated, Task.Delay(1000)) == unrelated, "Unrelated downloads must not queue behind the old modulo-32 lock collision");
+        await unrelated;
+    }
+    finally { handler.ReleaseSlow.TrySetResult(); }
+    await slow;
 
     if (args.Contains("--live"))
     {
@@ -241,6 +259,10 @@ sealed class FakeHandler : HttpMessageHandler
     public bool InvalidVtt;
     public Uri? LastSearch;
     public System.Collections.Concurrent.ConcurrentBag<string> Filenames = new();
+    public int CandidateCount = 12;
+    public string? SlowUrl;
+    public TaskCompletionSource SlowStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource ReleaseSlow = new(TaskCreationOptions.RunContinuationsAsynchronously);
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         if (request.RequestUri!.AbsolutePath.Contains("/subtitles/"))
@@ -252,12 +274,17 @@ sealed class FakeHandler : HttpMessageHandler
             await Task.Delay(20, cancellationToken);
             if (FailSearch) return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
             var requestBase = new Uri(request.RequestUri.AbsoluteUri[..(request.RequestUri.AbsoluteUri.IndexOf("/subtitles/", StringComparison.Ordinal) + 1)]);
-            var tracks = Enumerable.Range(0, 12).Select(i => new SubtitleTrack($"track-{i}", i % 2 == 0 ? "swe" : "eng", i switch { 10 => "Blu-ray · FraMeSToR", 8 => "WEB-DL · NTbX", 6 => "WEB-DL · NTb", _ => $"WEB-DL #{i}" }, new Uri(requestBase, $"track/{i}.vtt").AbsoluteUri)).ToList();
+            var tracks = Enumerable.Range(0, CandidateCount).Select(i => new SubtitleTrack($"track-{i}", i % 2 == 0 ? "swe" : "eng", i switch { 10 => "Blu-ray · FraMeSToR", 8 => "WEB-DL · NTbX", 6 => "WEB-DL · NTb", _ => $"WEB-DL #{i}" }, new Uri(requestBase, $"track/{i}.vtt").AbsoluteUri)).ToList();
             tracks.Add(new("danish", "dan", "WEB-DL", new Uri(requestBase, "track/dan.vtt").AbsoluteUri));
             tracks.Add(new("evil", "swe", "Unsafe", "https://evil.test/track.vtt"));
             return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { subtitles = tracks })) };
         }
         Interlocked.Increment(ref Downloads);
+        if (request.RequestUri.AbsoluteUri == SlowUrl)
+        {
+            SlowStarted.TrySetResult();
+            await ReleaseSlow.Task.WaitAsync(cancellationToken);
+        }
         await Task.Delay(20, cancellationToken);
         return new(HttpStatusCode.OK) { Content = new StringContent(InvalidVtt ? "<html>Error</html>" : "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\nHej!\n", Encoding.UTF8, "text/vtt") };
     }

@@ -47,7 +47,7 @@ The default service is the **external `lsoares` deployment** at [popcorn-notes.l
 
 The service and its infrastructure can see your server's public IP address, requested IMDb IDs, language settings, filenames and any synthetic release hints. Your video bytes are not uploaded. **No verified public logging or retention policy was found; what the operator logs and how long it retains data are unknown.** Do not assume requests are anonymous or unlogged. The operator can change its behavior independently of this plugin.
 
-**Allow AI and added informational notes** is an explicit opt-in, off by default, including upgrades from URLs containing `ai=on`. When off, requests force `ai=off` and skip the service's recap, trivia, goofs, characters and ratings categories. Enabling it allows these categories. This is not a control for AI-translated subtitles. The provider may still add its own messages or other content; this plugin does not guarantee clean or unmodified subtitle text.
+**Allow AI and added informational notes** is an explicit opt-in, off by default, including upgrades from URLs containing `ai=on`. When off, requests force `ai=off` and skip the service's title-card, recap, trivia, goofs, characters and ratings categories. Enabling it allows these categories. This is not a control for AI-translated subtitles. The provider may still add its own messages or other content; this plugin does not guarantee clean or unmodified subtitle text.
 
 Normal server logs include download labels/languages and warnings about failures. Request exceptions may contain upstream URLs. There is no separate analytics or telemetry service in the plugin.
 

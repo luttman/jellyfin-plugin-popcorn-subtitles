@@ -10,7 +10,7 @@ namespace Jellyfin.Plugin.PopcornSubtitles;
 public sealed class PluginConfiguration : BasePluginConfiguration
 {
     public bool Enabled { get; set; } = true;
-    public string ManifestUrl { get; set; } = "https://popcorn-notes.lsoares.workers.dev/langs=swe,eng&skip=recap,trivia,goofs,characters,ratings&ai=off/manifest.json";
+    public string ManifestUrl { get; set; } = "https://popcorn-notes.lsoares.workers.dev/langs=swe,eng&skip=card,recap,trivia,goofs,characters,ratings&ai=off/manifest.json";
     public bool EnableAiNotes { get; set; }
     public bool SearchReleaseGroups { get; set; }
     public int ResultsPerLanguage { get; set; } = 4;

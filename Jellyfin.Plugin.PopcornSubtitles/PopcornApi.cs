@@ -49,7 +49,7 @@ public sealed class PopcornApi : IDisposable
             // ai=off alone still allows non-AI trivia; the explicit checkbox controls both.
             var match = Regex.Match(baseUrl, @"(?<=[/&])skip=([^/&]*)");
             var existing = Uri.UnescapeDataString(match.Groups[1].Value).Split(',', StringSplitOptions.RemoveEmptyEntries);
-            var categories = new[] { "recap", "trivia", "goofs", "characters", "ratings" };
+            var categories = new[] { "card", "recap", "trivia", "goofs", "characters", "ratings" };
             var skip = enableAiNotes.Value ? existing.Except(categories) : existing.Concat(categories).Distinct();
             baseUrl = SetOption(baseUrl, "skip", string.Join(',', skip.Select(Uri.EscapeDataString)));
         }

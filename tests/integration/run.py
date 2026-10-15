@@ -32,7 +32,7 @@ def api(path, body=None, method=None, raw=False, headers=None):
             content = response.read()
             return content if raw else (json.loads(content) if content else None)
     except urllib.error.HTTPError as error:
-        raise RuntimeError(f'{path}: HTTP {error.code}: {error.read().decode(errors="replace")}') from error
+        raise RuntimeError(f'{path}: HTTP {error.code}: {error.read().decode(errors="replace")[:500]}') from error
 
 
 try:
@@ -65,7 +65,8 @@ try:
         '-e', 'JELLYFIN_CACHE_DIR=/config/cache', '-v', f'{config}:/config', '-v', f'{media}:/media:ro', 'popcorn-jellyfin-ci')
     for attempt in range(90):
         try:
-            api('/System/Info/Public')
+            # Jellyfin's setup status server exposes public system info before the main API is ready.
+            api('/Startup/Configuration')
             break
         except Exception:
             if attempt == 89: raise
