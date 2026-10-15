@@ -1,6 +1,16 @@
 [
   {
+    "name": "Popcorn Subtitles",
+    "overview": "On-demand subtitles with language and release group preferences.",
     "versions": [
+      {
+        "targetAbi": "12.2.0.0",
+        "sourceUrl": "https://github.com/luttman/jellyfin-plugin-popcorn-subtitles/releases/download/v0.3.0.0/PopcornSubtitles_0.3.0.0.zip",
+        "timestamp": "2026-10-15T23:13:58.1104836Z",
+        "checksum": "b77dfce33f93eb911913ed34c00c759f",
+        "version": "0.3.0.0",
+        "changelog": "# 0.3.0.0\n\n- Optional upstream release-group filename hints, capped at three extra parallel requests.\n- Real Jellyfin 12.2 container CI: playback track list, ISO 639-2/B language codes, video delivery and on-demand subtitle conversion.\n- Three-second shared search budget, parallel alternate-version searches, and a two-minute failure cache.\n- Separate search/result caches, DNS connection refresh, per-path download locks, and stale temporary-file cleanup.\n- Explicit opt-in for AI and informational notes, off by default even for older manifest URLs.\n- English settings and documentation, configurable results per language, and an administrator-only test-search button.\n- GPL-3.0-only license, safer missing-service registration, and release metadata derived from the assembly/project and this changelog."
+      },
       {
         "checksum": "000d33c7e4fe5fe0ac5f322b4e8f36f5",
         "timestamp": "2026-10-15T22:21:31.6125617Z",
@@ -18,11 +28,9 @@
         "sourceUrl": "https://github.com/luttman/jellyfin-plugin-popcorn-subtitles/releases/download/v0.1.0.0/PopcornSubtitles_0.1.0.0.zip"
       }
     ],
-    "owner": "luttman",
-    "guid": "a4b728c6-9e52-47ab-9184-bc34d137efb2",
     "category": "Subtitles",
-    "overview": "On-demand subtitles with language and release group preferences.",
-    "name": "Popcorn Subtitles",
-    "description": "On-demand subtitles from Popcorn Notes for local movies and episodes. Experimental; requires IMDb metadata. Web and Android TV playback have not yet been verified on a running server."
+    "guid": "a4b728c6-9e52-47ab-9184-bc34d137efb2",
+    "description": "On-demand subtitles with separate language and release preferences for movies and series.",
+    "owner": "luttman"
   }
 ]
