@@ -7,8 +7,14 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace Jellyfin.Plugin.PopcornSubtitles;
 
-public sealed record SubtitleTrack(string Id, string Lang, string Label, string Url);
+public sealed record SubtitleTrack(string Id, string Lang, string Label, string Url,
+    string ProviderName = "Popcorn", string Format = "vtt", string ProviderKey = "");
 internal sealed record SubtitleResults([property: JsonPropertyName("subtitles")] SubtitleTrack[]? Subtitles);
+public sealed record ProviderStatus(string Name, string Status, int Count);
+public sealed record ProviderSearchResult(SubtitleTrack[] Tracks, ProviderStatus[] Providers)
+{
+    public bool HasFailures => Providers.Any(p => p.Status == "failed");
+}
 
 public sealed class PopcornApi : IDisposable
 {
@@ -70,7 +76,8 @@ public sealed class PopcornApi : IDisposable
     public static string CacheKey(string value) => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
 
     public async Task<SubtitleTrack[]> SearchAsync(Uri baseUri, string type, string id, string filename, CancellationToken token,
-        IReadOnlyList<string>? languages = null, IReadOnlyList<string>? releaseGroups = null, int limit = 4, bool searchReleaseGroups = false)
+        IReadOnlyList<string>? languages = null, IReadOnlyList<string>? releaseGroups = null, int limit = 4, bool searchReleaseGroups = false,
+        SubtitleProviderConfiguration? provider = null)
     {
         if (limit is < 1 or > 20) throw new ArgumentOutOfRangeException(nameof(limit));
         var preferredLanguages = (languages ?? new[] { "swe", "eng" }).ToArray();
@@ -93,13 +100,53 @@ public sealed class PopcornApi : IDisposable
         }));
         if (batches.All(b => b.Error is not null)) throw batches[0].Error!;
         return batches.SelectMany(b => b.Tracks)
-            .Where(t => t is not null && !string.IsNullOrEmpty(t.Id) && preferredLanguages.Contains(ToTerminologic(t.Lang)) && IsTrackUri(baseUri, t.Url))
-            .Select(t => t with { Lang = ToTerminologic(t.Lang) })
+            .Where(t => t is not null && !string.IsNullOrEmpty(t.Id) && t.Id.Length <= 512 && (t.Label?.Length ?? 0) <= 2048
+                && preferredLanguages.Contains(ToTerminologic(t.Lang))
+                && (provider is null || provider.PopcornOptions ? IsTrackUri(baseUri, t.Url) : IsDownloadUri(baseUri, t.Url, provider.GetDownloadHosts())))
+            .Select(t => t with { Lang = ToTerminologic(t.Lang), ProviderName = provider?.Name ?? "Popcorn",
+                ProviderKey = provider is null ? "" : CacheKey(baseUri.AbsoluteUri),
+                Format = provider is null || provider.PopcornOptions ? "vtt" : GuessFormat(t) })
             .DistinctBy(t => t.Id)
             .GroupBy(t => t.Lang)
             .OrderBy(g => Array.IndexOf(preferredLanguages, g.Key))
             .SelectMany(g => g.OrderBy(t => GroupPriority(t.Label, patterns)).Take(limit))
             .ToArray();
+    }
+
+    public async Task<ProviderSearchResult> SearchProvidersAsync(PluginConfiguration config, string type, string id, string filename, CancellationToken token)
+    {
+        config.Validate();
+        var languages = PluginConfiguration.ParseLanguages(type == "series" ? config.SeriesLanguages : config.MovieLanguages);
+        var groups = PluginConfiguration.ParseGroups(type == "series" ? config.SeriesReleaseGroups : config.MovieReleaseGroups);
+        var results = await Task.WhenAll(config.GetProviders().Select(async provider =>
+        {
+            try
+            {
+                // Generic Stremio URLs may contain opaque private configuration. Never rewrite their paths.
+                var baseUri = provider.PopcornOptions ? GetBaseUri(provider.ManifestUrl, languages, config.EnableAiNotes) : GetBaseUri(provider.ManifestUrl);
+                var tracks = await SearchAsync(baseUri, type, id, filename, token, languages, groups, config.ResultsPerLanguage, config.SearchReleaseGroups, provider);
+                return (Tracks: tracks, Status: new ProviderStatus(provider.Name, "ok", tracks.Length));
+            }
+            catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or InvalidDataException or JsonException)
+            {
+                return (Tracks: Array.Empty<SubtitleTrack>(), Status: new ProviderStatus(provider.Name, "failed", 0));
+            }
+        }));
+        return new ProviderSearchResult(results.SelectMany(r => r.Tracks).ToArray(), results.Select(r => r.Status).ToArray());
+    }
+
+    public static bool IsDownloadUri(Uri source, string? value, IReadOnlyList<string> allowedHosts) =>
+        Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme == "https"
+        && string.IsNullOrEmpty(uri.UserInfo) && string.IsNullOrEmpty(uri.Fragment)
+        && (uri.Authority.Equals(source.Authority, StringComparison.OrdinalIgnoreCase)
+            || (uri.IsDefaultPort && allowedHosts.Contains(uri.Host, StringComparer.OrdinalIgnoreCase)));
+
+    private static string GuessFormat(SubtitleTrack track)
+    {
+        var extension = Path.GetExtension(new Uri(track.Url).AbsolutePath).TrimStart('.').ToLowerInvariant();
+        if (extension is "vtt" or "srt" or "ass" or "ssa") return extension;
+        var hint = Regex.Match(track.Label ?? "", @"\[(vtt|srt|ass|ssa)\]", RegexOptions.IgnoreCase);
+        return hint.Success ? hint.Groups[1].Value.ToLowerInvariant() : "srt";
     }
 
     public static string ReleaseHint(string filename, string group)
@@ -139,19 +186,28 @@ public sealed class PopcornApi : IDisposable
         && string.IsNullOrEmpty(uri.UserInfo)
         && uri.AbsolutePath.StartsWith(baseUri.AbsolutePath + "track/", StringComparison.Ordinal);
 
-    public async Task<byte[]> DownloadAsync(string url, CancellationToken token)
+    public async Task<byte[]> DownloadAsync(string url, CancellationToken token, string format = "vtt")
     {
         var bytes = await ReadAsync(new Uri(url), token);
         var text = Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF');
-        if (!text.StartsWith("WEBVTT", StringComparison.Ordinal) || !text.Contains("-->", StringComparison.Ordinal))
-            throw new InvalidDataException("The subtitle service did not return a WebVTT subtitle.");
+        var valid = format switch
+        {
+            "vtt" => text.StartsWith("WEBVTT", StringComparison.Ordinal) && text.Contains("-->", StringComparison.Ordinal),
+            "srt" => Regex.IsMatch(text, @"(?m)^\s*\d+\s*\r?\n\d{1,2}:\d{2}:\d{2}[,.]\d{3}\s*-->") && !text.StartsWith("WEBVTT", StringComparison.Ordinal),
+            "ass" or "ssa" => text.Contains("[Script Info]", StringComparison.OrdinalIgnoreCase) && text.Contains("Dialogue:", StringComparison.OrdinalIgnoreCase),
+            _ => false
+        };
+        if (!valid) throw new InvalidDataException("The subtitle provider returned an invalid or unsupported subtitle format.");
         return bytes;
     }
 
     private async Task<byte[]> ReadAsync(Uri uri, CancellationToken token)
     {
-        using var response = await _http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, token);
-        response.EnsureSuccessStatusCode();
+        HttpResponseMessage response;
+        try { response = await _http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, token); }
+        catch (HttpRequestException ex) { throw new HttpRequestException("Subtitle provider request failed. Private URL omitted.", null, ex.StatusCode); }
+        using var responseScope = response;
+        if (!response.IsSuccessStatusCode) throw new HttpRequestException("Subtitle provider returned HTTP " + (int)response.StatusCode + ". Private URL omitted.", null, response.StatusCode);
         if (response.Content.Headers.ContentLength > MaxResponseBytes)
             throw new InvalidDataException("Subtitle response is too large.");
         await using var input = await response.Content.ReadAsStreamAsync(token);

@@ -15,15 +15,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data = json.dumps(requests).encode()
             content_type = 'application/json'
         elif '/subtitles/' in path:
+            if path.startswith('/failed/'):
+                self.send_error(503)
+                return
             base = 'https://popcorn-fixture:8443/' + path.split('/')[1] + '/'
+            generic = path.startswith('/opaque-config/')
             data = json.dumps({'subtitles': [
-                {'id': lang, 'lang': lang, 'label': 'WEB-DL · TEST', 'url': base + 'track/' + lang + '.vtt'}
+                {'id': lang, 'lang': lang, 'label': 'WEB-DL · TEST', 'url': base + 'track/' + lang + ('.srt' if generic else '.vtt')}
                 for lang in ['eng', 'deu', 'fra']
             ]}).encode()
             content_type = 'application/json'
         elif '/track/' in path:
-            data = b'WEBVTT\n\n00:00:00.000 --> 00:00:03.000\nCI subtitle from the selected track\n'
-            content_type = 'text/vtt'
+            if path.endswith('.srt'):
+                data = b'1\n00:00:00,000 --> 00:00:03,000\nCI subtitle from the selected track\n'
+                content_type = 'application/x-subrip'
+            else:
+                data = b'WEBVTT\n\n00:00:00.000 --> 00:00:03.000\nCI subtitle from the selected track\n'
+                content_type = 'text/vtt'
         else:
             self.send_error(404)
             return

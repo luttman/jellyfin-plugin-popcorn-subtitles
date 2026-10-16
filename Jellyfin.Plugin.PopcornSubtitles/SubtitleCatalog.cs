@@ -8,6 +8,7 @@ using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Model.Entities;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Logging;
+using System.Text.Json;
 
 namespace Jellyfin.Plugin.PopcornSubtitles;
 
@@ -15,6 +16,7 @@ public sealed record AvailableSubtitle(int Index, SubtitleTrack Track, string Pa
 
 public sealed class SubtitleCatalog : IDisposable
 {
+    private sealed record SearchBatch(AvailableSubtitle[] Tracks, DateTimeOffset ExpiresAt);
     private readonly PopcornApi _api;
     private readonly ILogger<SubtitleCatalog> _logger;
     private readonly string _directory;
@@ -45,26 +47,23 @@ public sealed class SubtitleCatalog : IDisposable
         var config = Plugin.Instance?.Configuration;
         if (config is null || !config.Enabled || !TryIdentity(item, out var type, out var id))
             return;
-        (Guid, string, string, string, string, int, bool) cacheKey = default;
+        (Guid, string, string, string) cacheKey = default;
         try
         {
-            var languages = PluginConfiguration.ParseLanguages(type == "series" ? config.SeriesLanguages : config.MovieLanguages);
-            var groups = PluginConfiguration.ParseGroups(type == "series" ? config.SeriesReleaseGroups : config.MovieReleaseGroups);
-            var baseUri = PopcornApi.GetBaseUri(config.ManifestUrl, languages, config.EnableAiNotes);
-            var limit = config.ResultsPerLanguage;
-            var hints = config.SearchReleaseGroups;
-            cacheKey = (item.Id, baseUri.AbsoluteUri, item.Path, id, string.Join(',', groups), limit, hints);
+            cacheKey = (item.Id, PopcornApi.CacheKey(JsonSerializer.Serialize(config)), item.Path, id);
             if (_failures.TryGetValue(cacheKey, out _)) return;
-            Lazy<Task<AvailableSubtitle[]>> search;
+            Lazy<Task<SearchBatch>> search;
             lock (_gate)
             {
                 if (!_searches.TryGetValue(cacheKey, out search!))
                 {
-                    search = new Lazy<Task<AvailableSubtitle[]>>(() => SearchAsync(baseUri, type, id, item.Path, languages, groups, limit, hints));
+                    search = new Lazy<Task<SearchBatch>>(() => SearchAsync(config, type, id, item.Path));
                     _searches.Set(cacheKey, search, new MemoryCacheEntryOptions { Size = 1, AbsoluteExpirationRelativeToNow = TimeSpan.FromHours(6) });
                 }
             }
-            var tracks = await search.Value.WaitAsync(token);
+            var batch = await search.Value.WaitAsync(token);
+            _searches.Set(cacheKey, search, new MemoryCacheEntryOptions { Size = 1, AbsoluteExpiration = batch.ExpiresAt });
+            var tracks = batch.Tracks;
             _results.Set(item.Id, tracks, new MemoryCacheEntryOptions { Size = 1, SlidingExpiration = TimeSpan.FromHours(12) });
             foreach (var track in tracks)
                 _paths.Set(track.Path, track, new MemoryCacheEntryOptions { Size = 1, SlidingExpiration = TimeSpan.FromHours(12) });
@@ -75,7 +74,7 @@ public sealed class SubtitleCatalog : IDisposable
             lock (_gate)
             {
                 if (!_failures.TryGetValue(cacheKey, out _))
-                    _logger.LogWarning(ex, "Popcorn subtitle search failed for {ItemId}; retrying after two minutes", item.Id);
+                    _logger.LogWarning("Subtitle search failed for {ItemId} ({ErrorType}); retrying after two minutes. Private URLs omitted.", item.Id, ex.GetType().Name);
                 _failures.Set(cacheKey, true, new MemoryCacheEntryOptions { Size = 1, AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(2) });
                 _searches.Remove(cacheKey);
                 _results.Remove(item.Id);
@@ -106,16 +105,19 @@ public sealed class SubtitleCatalog : IDisposable
         return true;
     }
 
-    private async Task<AvailableSubtitle[]> SearchAsync(Uri baseUri, string type, string id, string filename, string[] languages, string[] groups, int limit, bool hints)
+    private async Task<SearchBatch> SearchAsync(PluginConfiguration config, string type, string id, string filename)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-        var tracks = await _api.SearchAsync(baseUri, type, id, System.IO.Path.GetFileName(filename), timeout.Token, languages, groups, limit, hints);
-        return tracks.Select(t =>
+        var result = await _api.SearchProvidersAsync(config, type, id, System.IO.Path.GetFileName(filename), timeout.Token);
+        foreach (var status in result.Providers.Where(p => p.Status == "failed"))
+            _logger.LogWarning("Subtitle provider {Provider} did not respond successfully; partial results remain available and failed searches retry after two minutes", status.Name);
+        var tracks = result.Tracks.Select(t =>
         {
-            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(t.Id));
+            var hash = SHA256.HashData(Encoding.UTF8.GetBytes(t.ProviderKey + ":" + t.Id));
             var index = 1_000_000 + (int)(BinaryPrimitives.ReadUInt32LittleEndian(hash) % 1_000_000_000);
-            return new AvailableSubtitle(index, t, System.IO.Path.Combine(_directory, PopcornApi.CacheKey(t.Url) + ".vtt"));
+            return new AvailableSubtitle(index, t, System.IO.Path.Combine(_directory, PopcornApi.CacheKey(t.Url) + "." + t.Format));
         }).DistinctBy(t => t.Index).ToArray();
+        return new SearchBatch(tracks, DateTimeOffset.UtcNow.Add(result.HasFailures ? TimeSpan.FromMinutes(2) : TimeSpan.FromHours(6)));
     }
 
     public IReadOnlyList<MediaStream> AddStreams(Guid itemId, IReadOnlyList<MediaStream> original)
@@ -131,9 +133,9 @@ public sealed class SubtitleCatalog : IDisposable
             {
                 Index = track.Index,
                 Type = MediaStreamType.Subtitle,
-                Codec = "vtt",
+                Codec = track.Track.Format == "srt" ? "subrip" : track.Track.Format,
                 Language = PopcornApi.ToBibliographic(track.Track.Lang),
-                Title = $"Popcorn · {track.Track.Label}",
+                Title = $"{track.Track.ProviderName} · {(string.IsNullOrWhiteSpace(track.Track.Label) ? track.Track.Lang.ToUpperInvariant() : track.Track.Label)}",
                 Path = track.Path,
                 IsExternal = true,
                 SupportsExternalStream = true,
@@ -165,7 +167,13 @@ public sealed class SubtitleCatalog : IDisposable
                 File.SetLastWriteTimeUtc(track.Path, DateTime.UtcNow);
                 return;
             }
-            var bytes = await _api.DownloadAsync(track.Track.Url, token);
+            byte[] bytes;
+            try { bytes = await _api.DownloadAsync(track.Track.Url, token, track.Track.Format); }
+            catch (OperationCanceledException) { throw new OperationCanceledException("Subtitle download was canceled. Private URL omitted.", token); }
+            catch (Exception ex) when (ex is HttpRequestException or IOException or InvalidDataException)
+            {
+                throw new InvalidDataException("Subtitle download failed or returned an unsupported format. Private URL omitted.");
+            }
             Directory.CreateDirectory(_directory);
             var temp = track.Path + "." + Guid.NewGuid().ToString("N") + ".tmp";
             try
@@ -174,7 +182,7 @@ public sealed class SubtitleCatalog : IDisposable
                 File.Move(temp, track.Path, true);
             }
             finally { if (File.Exists(temp)) File.Delete(temp); }
-            _logger.LogInformation("Downloaded Popcorn subtitle {Language}: {Label}", track.Track.Lang, track.Track.Label);
+            _logger.LogInformation("Downloaded subtitle from {Provider}: {Language} ({Format})", track.Track.ProviderName, track.Track.Lang, track.Track.Format);
             Cleanup();
         }
         finally
@@ -202,8 +210,8 @@ public sealed class SubtitleCatalog : IDisposable
             foreach (var file in Directory.EnumerateFiles(_directory))
             {
                 var extension = System.IO.Path.GetExtension(file);
-                var retention = extension == ".vtt" ? TimeSpan.FromDays(7) : TimeSpan.FromDays(1);
-                if (extension is not (".vtt" or ".tmp")) continue;
+                var retention = extension == ".tmp" ? TimeSpan.FromDays(1) : TimeSpan.FromDays(7);
+                if (extension is not (".vtt" or ".srt" or ".ass" or ".ssa" or ".tmp")) continue;
                 try { if (File.GetLastWriteTimeUtc(file) < now - retention) File.Delete(file); }
                 catch (IOException) { }
                 catch (UnauthorizedAccessException) { }

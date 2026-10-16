@@ -24,13 +24,11 @@ public sealed class TestSearchController(PopcornApi api) : ControllerBase
                 || string.IsNullOrWhiteSpace(request.Filename) || request.Filename.Length > 512)
                 return BadRequest("Enter a movie IMDb ID or a series IMDb ID with season and episode, and a filename.");
             var config = request.Configuration;
-            var languages = PluginConfiguration.ParseLanguages(request.Type == "series" ? config.SeriesLanguages : config.MovieLanguages);
-            var groups = PluginConfiguration.ParseGroups(request.Type == "series" ? config.SeriesReleaseGroups : config.MovieReleaseGroups);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
             timeout.CancelAfter(TimeSpan.FromSeconds(3));
-            var tracks = await api.SearchAsync(PopcornApi.GetBaseUri(config.ManifestUrl, languages, config.EnableAiNotes), request.Type,
-                request.Id, Path.GetFileName(request.Filename), timeout.Token, languages, groups, config.ResultsPerLanguage, config.SearchReleaseGroups);
-            return Ok(new { count = tracks.Length, tracks = tracks.Select(t => new { language = t.Lang, label = t.Label }) });
+            var result = await api.SearchProvidersAsync(config, request.Type, request.Id, Path.GetFileName(request.Filename), timeout.Token);
+            return Ok(new { count = result.Tracks.Length, providers = result.Providers.Select(p => new { name = p.Name, status = p.Status, count = p.Count }),
+                tracks = result.Tracks.Select(t => new { language = t.Lang, label = t.Label, provider = t.ProviderName, format = t.Format }) });
         }
         catch (ArgumentException ex) { return BadRequest(ex.Message); }
         catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or InvalidDataException or System.Text.Json.JsonException)

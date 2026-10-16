@@ -1,3 +1,13 @@
+# 0.4.0.0
+
+- Public Popcorn Notes and OpenSubtitles providers are included by default.
+- Add, remove, enable or disable up to eight additional Stremio subtitle providers.
+- SubSense has an empty private-URL row; personal URLs are never included in source or releases.
+- Preserve opaque provider paths, mask private URLs in settings, omit request URLs from errors, and require explicit CDN download hostnames.
+- Label tracks by provider, namespace their IDs, apply result limits per provider and language, and isolate provider failures.
+- Support SRT, VTT and declared ASS/SSA subtitles with the correct codec and cache extension.
+- Test search reports per-provider status; real-server CI covers mixed VTT/SRT providers and one unavailable provider.
+
 # 0.3.0.0
 
 - Optional upstream release-group filename hints, capped at three extra parallel requests.

@@ -40,9 +40,12 @@
       <div class="inputContainer">
         <label class="inputLabel" for="PopcornLimit">Results per language</label>
         <input id="PopcornLimit" type="number" min="1" max="20" step="1" required is="emby-input" aria-describedby="LimitHelp">
-        <div id="LimitHelp" class="fieldDescription">1–20 results, after group prioritization. Default: 4. Other releases remain available as fallback.</div>
+        <div id="LimitHelp" class="fieldDescription">1–20 results per language, per provider, after group prioritization. Default: 4. Providers may return overlapping subtitles.</div>
       </div>
       <h3>Subtitle service</h3>
+      <div class="checkboxContainer checkboxContainer-withDescription">
+        <label><input id="PopcornSourceEnabled" type="checkbox" is="emby-checkbox"><span>Enable Popcorn Notes</span></label>
+      </div>
       <div class="inputContainer">
         <label class="inputLabel" for="PopcornManifest">Popcorn Notes manifest URL</label>
         <input id="PopcornManifest" type="url" is="emby-input" required aria-describedby="ManifestHelp">
@@ -52,6 +55,12 @@
         <label><input id="PopcornAiNotes" type="checkbox" is="emby-checkbox" aria-describedby="AiHelp"><span>Allow AI and added informational notes</span></label>
         <div id="AiHelp" class="fieldDescription">Opt in to AI trivia and other added note categories. Off by default, including after upgrading from older versions. This is not an AI-translation setting. The provider may still include its own messages.</div>
       </div>
+      <h3>Additional subtitle providers</h3>
+      <p>OpenSubtitles is ready to use. To enable SubSense, paste your private manifest URL in its row and select Enable. Add more Stremio subtitle providers below. Generic manifest paths are kept unchanged.</p>
+      <p>Private URLs are saved in Jellyfin's server configuration. Keep configuration files and backups private. Never post these URLs to GitHub or share screenshots with the URLs revealed.</p>
+      <div class="checkboxContainer"><label><input id="PopcornShowUrls" type="checkbox" is="emby-checkbox"><span>Show provider URLs</span></label></div>
+      <div id="PopcornProviders"></div>
+      <button id="PopcornAddProvider" is="emby-button" type="button" class="raised block"><span>Add provider</span></button>
       <p>Changes apply to the next playback. Restart an existing playback to refresh its track list.</p>
       <button id="PopcornSave" is="emby-button" type="submit" class="raised button-submit block"><span>Save</span></button>
       <h3>Test search</h3>
@@ -80,6 +89,41 @@
     const fields = { MovieLanguages: '#PopcornMovieLanguages', SeriesLanguages: '#PopcornSeriesLanguages', MovieReleaseGroups: '#PopcornMovieGroups', SeriesReleaseGroups: '#PopcornSeriesGroups' };
     const split = value => value.split(/[,;\r\n]+/).map(s => s.trim()).filter(Boolean);
     const get = selector => page.querySelector(selector);
+    let rows = [];
+    function addProvider(provider) {
+      if (rows.length >= 8) return;
+      const element = document.createElement('div');
+      element.className = 'verticalSection';
+      // Static markup only: private URLs and names are assigned through DOM properties below.
+      element.innerHTML = '<h4 data-field="Heading"></h4>' +
+        '<div class="checkboxContainer"><label><input type="checkbox" class="emby-checkbox" data-field="Enabled"> Enable provider</label></div>' +
+        '<div class="inputContainer"><label>Provider name<input type="text" class="emby-input" data-field="Name" maxlength="60" autocomplete="off"></label></div>' +
+        '<div class="inputContainer"><label>Manifest URL<input type="password" class="emby-input" data-field="ManifestUrl" autocomplete="off" spellcheck="false"></label></div>' +
+        '<div class="inputContainer"><label>Additional download hosts<input type="text" class="emby-input" data-field="DownloadHosts" autocomplete="off" placeholder="subtitles.example.org, cdn.example.org"></label>' +
+        '<div class="fieldDescription">The manifest host is allowed automatically. Add exact HTTPS download hostnames, separated by commas, if the provider uses a separate CDN. No wildcards or paths.</div></div>' +
+        '<button type="button" class="raised emby-button" data-field="Remove">Remove provider</button>';
+      const inputs = {};
+      for (const key of ['Name', 'ManifestUrl', 'DownloadHosts', 'Enabled']) {
+        inputs[key] = element.querySelector('[data-field="' + key + '"]');
+        if (key === 'Enabled') inputs[key].checked = provider.Enabled ?? true;
+        else inputs[key].value = provider[key] ?? '';
+      }
+      element.querySelector('[data-field="Heading"]').textContent = provider.Name || 'New provider';
+      inputs.ManifestUrl.type = get('#PopcornShowUrls').checked ? 'text' : 'password';
+      const row = { element, inputs };
+      element.querySelector('[data-field="Remove"]').addEventListener('click', function () {
+        rows = rows.filter(r => r !== row);
+        element.remove();
+        get('#PopcornAddProvider').disabled = false;
+      });
+      rows.push(row);
+      get('#PopcornProviders').appendChild(element);
+      get('#PopcornAddProvider').disabled = rows.length >= 8;
+    }
+    get('#PopcornAddProvider').addEventListener('click', () => addProvider({ Name: '', Enabled: false }));
+    get('#PopcornShowUrls').addEventListener('change', function () {
+      for (const row of rows) row.inputs.ManifestUrl.type = this.checked ? 'text' : 'password';
+    });
     page.addEventListener('pageshow', async function () {
       get('#PopcornSave').disabled = true;
       try {
@@ -87,10 +131,18 @@
         get('#PopcornEnabled').checked = config.Enabled;
         get('#PopcornManifest').value = config.ManifestUrl;
         get('#PopcornAiNotes').checked = config.EnableAiNotes ?? false;
+        get('#PopcornSourceEnabled').checked = config.EnablePopcorn ?? true;
         get('#PopcornSearchGroups').checked = config.SearchReleaseGroups ?? false;
         get('#PopcornLimit').value = config.ResultsPerLanguage ?? 4;
         for (const [key, selector] of Object.entries(fields))
           get(selector).value = config[key] ?? (key.endsWith('Languages') ? 'swe,eng' : '');
+        rows = [];
+        get('#PopcornProviders').replaceChildren();
+        get('#PopcornShowUrls').checked = false;
+        for (const provider of config.AdditionalProviders ?? [
+          { Name: 'OpenSubtitles', Enabled: true, ManifestUrl: 'https://opensubtitles-v3.strem.io/manifest.json', DownloadHosts: 'subs5.strem.io' },
+          { Name: 'SubSense', Enabled: false, ManifestUrl: '', DownloadHosts: 'dl.opensubtitles.org,sub.wyzie.io' }
+        ]) addProvider(provider);
         get('#PopcornSave').disabled = false;
       } catch (_) { Dashboard.alert('Could not load settings. Open this page again.'); }
     });
@@ -116,7 +168,22 @@
       const limit = Number(get('#PopcornLimit').value);
       if (!Number.isInteger(limit) || limit < 1 || limit > 20) throw new Error('Results per language must be between 1 and 20.');
       const config = await ApiClient.getPluginConfiguration(pluginId);
+      const providers = rows.map(row => ({ Enabled: row.inputs.Enabled.checked, Name: row.inputs.Name.value.trim(),
+        ManifestUrl: row.inputs.ManifestUrl.value.trim(), DownloadHosts: row.inputs.DownloadHosts.value.trim() }));
+      for (const provider of providers) {
+        if (!provider.Name || provider.Name.length > 60 || /[\x00-\x1f\x7f]/.test(provider.Name)) throw new Error('Each provider needs a name of 1–60 characters.');
+        if (provider.Enabled || provider.ManifestUrl) {
+          let uri;
+          try { uri = new URL(provider.ManifestUrl); } catch (_) { throw new Error('Enter a valid provider manifest URL.'); }
+          if (uri.protocol !== 'https:' || !uri.pathname.endsWith('/manifest.json') || uri.search || uri.hash || uri.username || uri.password)
+            throw new Error('Provider manifests must be HTTPS URLs ending in /manifest.json.');
+        }
+        const hosts = split(provider.DownloadHosts);
+        if (hosts.length > 12 || hosts.some(h => !/^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/i.test(h) || !h.includes('.')))
+          throw new Error('Download hosts must be DNS hostnames without paths, ports or wildcards.');
+      }
       return Object.assign(config, values, { Enabled: get('#PopcornEnabled').checked, ManifestUrl: manifest,
+        EnablePopcorn: get('#PopcornSourceEnabled').checked, AdditionalProviders: providers,
         EnableAiNotes: get('#PopcornAiNotes').checked, SearchReleaseGroups: get('#PopcornSearchGroups').checked, ResultsPerLanguage: limit });
     }
     get('#PopcornSubtitlesForm').addEventListener('submit', async function (event) {
@@ -138,7 +205,8 @@
           Id: get('#PopcornTestId').value.trim(), Filename: get('#PopcornTestFilename').value.trim() };
         const result = await ApiClient.ajax({ type: 'POST', url: ApiClient.getUrl('PopcornSubtitles/TestSearch'),
           contentType: 'application/json', dataType: 'json', data: JSON.stringify(request) });
-        output.textContent = result.count + ' results\n' + result.tracks.map(t => t.language + ' · ' + t.label).join('\n');
+        output.textContent = result.count + ' results\n' + (result.providers ?? []).map(p => p.name + ': ' + p.status + ' (' + p.count + ')').join('\n') + '\n' +
+          result.tracks.map(t => (t.provider ? t.provider + ' · ' : '') + t.language + ' · ' + t.label).join('\n');
       } catch (error) { output.textContent = error.responseText || error.message || 'Search failed. Check the manifest URL and try again.'; }
       finally { this.disabled = false; }
     });

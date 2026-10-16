@@ -49,6 +49,10 @@ try:
 <MovieLanguages>eng,deu,fra</MovieLanguages><SeriesLanguages>eng</SeriesLanguages>
 <MovieReleaseGroups>TEST</MovieReleaseGroups><SeriesReleaseGroups />
 <EnableAiNotes>false</EnableAiNotes><ResultsPerLanguage>4</ResultsPerLanguage>
+<AdditionalProviders>
+<SubtitleProviderConfiguration><Name>Extra</Name><Enabled>true</Enabled><ManifestUrl>https://popcorn-fixture:8443/opaque-config/manifest.json</ManifestUrl></SubtitleProviderConfiguration>
+<SubtitleProviderConfiguration><Name>Unavailable</Name><Enabled>true</Enabled><ManifestUrl>https://popcorn-fixture:8443/failed/manifest.json</ManifestUrl></SubtitleProviderConfiguration>
+</AdditionalProviders>
 </PluginConfiguration>''')
     command('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', str(OUTPUT / 'key.pem'),
         '-out', str(OUTPUT / 'cert.pem'), '-days', '2', '-subj', '/CN=popcorn-fixture', '-addext', 'subjectAltName=DNS:popcorn-fixture')
@@ -96,8 +100,8 @@ try:
     playback = api(f'/Items/{item}/PlaybackInfo?UserId={user}')
     (OUTPUT / 'playback.json').write_text(json.dumps(playback, indent=2))
     source = playback['MediaSources'][0]
-    tracks = [s for s in source['MediaStreams'] if s.get('Title', '').startswith('Popcorn')]
-    assert len(tracks) == 3, tracks
+    tracks = [s for s in source['MediaStreams'] if s.get('Title', '').startswith(('Popcorn', 'Extra'))]
+    assert len(tracks) == 6, tracks
     assert {s['Language'] for s in tracks} == {'eng', 'ger', 'fre'}, tracks
     assert len({s['Index'] for s in source['MediaStreams']}) == len(source['MediaStreams']), 'Duplicate indexes'
     assert all(1_000_000 <= s['Index'] <= 1_001_000_000 for s in tracks)
@@ -119,10 +123,13 @@ try:
     test_request = {'Configuration': {
         'ManifestUrl': 'https://popcorn-fixture:8443/langs=eng/manifest.json',
         'MovieLanguages': 'eng,deu,fra', 'SeriesLanguages': 'eng', 'ResultsPerLanguage': 1,
-        'EnableAiNotes': False, 'SearchReleaseGroups': True, 'MovieReleaseGroups': 'TEST'},
+        'EnableAiNotes': False, 'SearchReleaseGroups': True, 'MovieReleaseGroups': 'TEST',
+        'AdditionalProviders': [
+            {'Name': 'Extra', 'Enabled': True, 'ManifestUrl': 'https://popcorn-fixture:8443/opaque-config/manifest.json'},
+            {'Name': 'Unavailable', 'Enabled': True, 'ManifestUrl': 'https://popcorn-fixture:8443/failed/manifest.json'}]},
         'Type': 'movie', 'Id': 'tt0133093', 'Filename': 'Fixture.2026-TEST.mp4'}
     tested = api('/PopcornSubtitles/TestSearch', test_request)
-    assert tested['count'] == 3, tested
+    assert tested['count'] == 6 and any(p['status'] == 'failed' for p in tested['providers']), tested
     try:
         api('/PopcornSubtitles/TestSearch', test_request, headers={'Authorization': ''})
         raise AssertionError('Anonymous test search was allowed')
@@ -143,6 +150,11 @@ try:
         assert b'CI subtitle' in api(url, raw=True), 'Device-profile subtitle delivery failed'
     # Exercise conversion, as required by clients requesting another text format.
     assert b'CI subtitle' in api(subtitle_path.replace('.vtt', '.srt'), raw=True)
+    extra = next(s for s in tracks if s['Title'].startswith('Extra') and s['Language'] == 'eng')
+    assert extra['Codec'] == 'subrip', extra
+    generic_url = f'/Videos/{item}/{source["Id"]}/Subtitles/{extra["Index"]}/0/Stream.vtt'
+    assert b'CI subtitle' in api(generic_url, raw=True), 'Generic SRT-to-VTT delivery failed'
+    assert len(list(config.rglob('popcorn-subtitles/*.srt'))) == 1, 'Generic SRT was not cached correctly'
     api('/Sessions/Playing/Stopped', {'ItemId': item, 'MediaSourceId': source['Id'], 'PositionTicks': 10000000})
     print('PASS: real Jellyfin loaded the plugin, returned unique high-index tracks with eng/ger/fre, played video, and downloaded only the selected subtitle.')
 finally:

@@ -46,7 +46,7 @@ var directory = Path.Combine(Path.GetTempPath(), "popcorn-selftest-" + Guid.NewG
 Directory.CreateDirectory(directory);
 try
 {
-    var config = new PluginConfiguration { ManifestUrl = manifest };
+    var config = new PluginConfiguration { ManifestUrl = manifest, AdditionalProviders = [] };
     var paths = Stub.For<IApplicationPaths>((_, _) => directory);
     var serializer = Stub.For<IXmlSerializer>((method, _) => method.Name.StartsWith("Deserialize") ? config : null);
     var plugin = new Plugin(paths, serializer);
@@ -238,6 +238,34 @@ try
     var variantManager = new PopcornMediaSourceManager(variantInner, provider.GetRequiredService<SubtitleCatalog>(), variantLibrary);
     await variantManager.GetPlaybackMediaSources(versions[0], null!, false, false, default);
     Check(handler.PeakSearches >= 3, "Search alternate versions concurrently rather than accumulating timeouts");
+    config.MovieLanguages = "eng";
+    config.MovieReleaseGroups = "";
+    config.ResultsPerLanguage = 2;
+    config.AdditionalProviders = [new() { Name = "Extra", ManifestUrl = "https://extra.test/OPAQUE-TEST-CONFIG/manifest.json", DownloadHosts = "cdn.test" }];
+    var multi = await api.SearchProvidersAsync(config, "movie", "tt0133093", "Movie.mkv", default);
+    Check(multi.Tracks.Length == 3 && multi.Providers.All(p => p.Status == "ok"), "Combine results with an independent limit for each provider");
+    Check(handler.LastGenericPath!.StartsWith("/OPAQUE-TEST-CONFIG/subtitles/movie/"), "Keep private Stremio configuration paths unchanged");
+    var generic = multi.Tracks.Single(t => t.ProviderName == "Extra");
+    Check(generic.Format == "srt" && generic.Id == "track-0", "Recognize SRT tracks while retaining the provider's ID");
+    Check(!PopcornApi.IsDownloadUri(new Uri("https://extra.test/config/"), "https://unapproved.test/a.srt", new[] { "cdn.test" }), "Reject unapproved external download hosts");
+    var augmented = (await manager.GetPlaybackMediaSources(movie, null!, false, false, default)).Single();
+    var genericStream = augmented.MediaStreams.Single(s => s.Title?.StartsWith("Extra ·") == true);
+    Check(genericStream.Codec == "subrip" && genericStream.Path.EndsWith(".srt"), "Expose SRT with the correct Jellyfin codec and cache extension");
+    Check(augmented.MediaStreams.Select(s => s.Index).Distinct().Count() == augmented.MediaStreams.Count, "Namespace duplicate external IDs across providers");
+    await provider.GetRequiredService<SubtitleCatalog>().MaterializeAsync(genericStream, default);
+    Check(File.ReadAllText(genericStream.Path).Contains("Extra provider subtitle"), "Download and validate a generic provider's SRT lazily");
+    handler.FailedHosts.Add("example.test");
+    var partial = await api.SearchProvidersAsync(config, "movie", "tt0133093", "Movie.mkv", default);
+    Check(partial.Tracks.Length == 1 && partial.HasFailures && partial.Tracks[0].ProviderName == "Extra", "Keep working providers when another provider fails");
+    config.MovieReleaseGroups = "changed";
+    await provider.GetRequiredService<SubtitleCatalog>().EnsureAsync(movie, default);
+    var partialSearches = handler.Searches;
+    await provider.GetRequiredService<SubtitleCatalog>().EnsureAsync(movie, default);
+    Check(handler.Searches == partialSearches, "Cache partial failures so an unavailable provider does not delay each playback request");
+    handler.PrivateError = true;
+    try { await api.DownloadAsync("https://cdn.test/OPAQUE-TEST-CONFIG.srt", default, "srt"); throw new Exception("Expected private request failure"); }
+    catch (HttpRequestException ex) { Check(!ex.ToString().Contains("OPAQUE-TEST-CONFIG"), "Do not leak private URLs through request exceptions"); }
+    handler.PrivateError = false;
 
     if (args.Contains("--live"))
     {
@@ -248,6 +276,27 @@ try
         var bytes = await live.DownloadAsync(swedish.Url, default);
         Check(bytes.Length > 100, "Live Swedish VTT must contain subtitle data");
         Console.WriteLine($"Live service: {tracks.Length} tracks; Swedish VTT {bytes.Length} bytes.");
+    }
+    if (args.Contains("--live-providers"))
+    {
+        using var live = new PopcornApi();
+        var liveConfig = new PluginConfiguration { MovieLanguages = "eng,swe" };
+        var privateManifest = Environment.GetEnvironmentVariable("POPCORN_PRIVATE_MANIFEST");
+        if (!string.IsNullOrEmpty(privateManifest))
+        {
+            liveConfig.AdditionalProviders[1].ManifestUrl = privateManifest;
+            liveConfig.AdditionalProviders[1].Enabled = true;
+        }
+        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var result = await live.SearchProvidersAsync(liveConfig, "movie", "tt0133093", "The.Matrix.1999.1080p.BluRay.mkv", budget.Token);
+        foreach (var status in result.Providers)
+        {
+            Check(status.Status == "ok" && status.Count > 0, "A live provider did not return test results; private URL omitted");
+            var track = result.Tracks.First(t => t.ProviderName == status.Name);
+            var content = await live.DownloadAsync(track.Url, default, track.Format);
+            Check(content.Length > 100, "Live provider subtitle data is empty");
+            Console.WriteLine($"Live provider {status.Name}: {status.Count} results, {track.Format} validated ({content.Length} bytes). Private URLs omitted.");
+        }
     }
     Console.WriteLine($"PASS: {checks} checks.");
 }
@@ -280,6 +329,9 @@ sealed class FakeHandler : HttpMessageHandler
     public string? SlowUrl;
     public TaskCompletionSource SlowStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
     public TaskCompletionSource ReleaseSlow = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public string? LastGenericPath;
+    public HashSet<string> FailedHosts = [];
+    public bool PrivateError;
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         if (request.RequestUri!.AbsolutePath.Contains("/subtitles/"))
@@ -293,7 +345,15 @@ sealed class FakeHandler : HttpMessageHandler
             do { previous = PeakSearches; } while (active > previous && Interlocked.CompareExchange(ref PeakSearches, active, previous) != previous);
             try { await Task.Delay(SearchDelay, cancellationToken); }
             finally { Interlocked.Decrement(ref ActiveSearches); }
-            if (FailSearch) return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+            if (FailSearch || FailedHosts.Contains(request.RequestUri.Host)) return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+            if (request.RequestUri.Host == "extra.test")
+            {
+                LastGenericPath = request.RequestUri.AbsolutePath;
+                return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { subtitles = new[] {
+                    new SubtitleTrack("track-0", "eng", "[SRT] · NTb", "https://cdn.test/a.srt"),
+                    new SubtitleTrack("unapproved", "eng", "[SRT]", "https://unapproved.test/a.srt")
+                } })) };
+            }
             var requestBase = new Uri(request.RequestUri.AbsoluteUri[..(request.RequestUri.AbsoluteUri.IndexOf("/subtitles/", StringComparison.Ordinal) + 1)]);
             var tracks = Enumerable.Range(0, CandidateCount).Select(i => new SubtitleTrack($"track-{i}", i % 2 == 0 ? "swe" : "eng", i switch { 10 => "Blu-ray · FraMeSToR", 8 => "WEB-DL · NTbX", 6 => "WEB-DL · NTb", _ => $"WEB-DL #{i}" }, new Uri(requestBase, $"track/{i}.vtt").AbsoluteUri)).ToList();
             tracks.Add(new("danish", "dan", "WEB-DL", new Uri(requestBase, "track/dan.vtt").AbsoluteUri));
@@ -301,6 +361,9 @@ sealed class FakeHandler : HttpMessageHandler
             return new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(new { subtitles = tracks })) };
         }
         Interlocked.Increment(ref Downloads);
+        if (PrivateError) throw new HttpRequestException("Sensitive URL: OPAQUE-TEST-CONFIG");
+        if (request.RequestUri.Host == "cdn.test")
+            return new(HttpStatusCode.OK) { Content = new StringContent("1\n00:00:00,000 --> 00:00:03,000\nExtra provider subtitle\n", Encoding.UTF8, "application/x-subrip") };
         if (request.RequestUri.AbsoluteUri == SlowUrl)
         {
             SlowStarted.TrySetResult();
